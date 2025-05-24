@@ -27,6 +27,7 @@ from app.utils.http import RequestUtils
 from app.utils.site import SiteUtils
 from app.utils.string import StringUtils
 from app.utils.timer import TimerUtils
+from app.plugins.autosignin.openai import OpenAi
 
 
 class AutoSignIn(_PluginBase):
@@ -128,6 +129,21 @@ class AutoSignIn(_PluginBase):
                 if self._scheduler.get_jobs():
                     self._scheduler.print_jobs()
                     self._scheduler.start()
+
+        chatgpt = self.get_config("ChatGPT")
+        if not chatgpt:
+            logger.error(f"ChatGPT插件未启用")
+            return
+        _openai_key = chatgpt and chatgpt.get("openai_key")
+        _openai_url = chatgpt and chatgpt.get("openai_url")
+        _openai_proxy = chatgpt and chatgpt.get("proxy")
+        _openai_model = chatgpt and chatgpt.get("model")
+        if not _openai_key:
+            logger.error(f"ChatGPT插件未启用")
+            return
+        self.openai = OpenAi(api_key=_openai_key, api_url=_openai_url,
+                             proxy=settings.PROXY if _openai_proxy else None,
+                             model=_openai_model)
 
     def get_state(self) -> bool:
         return self._enabled
@@ -1523,7 +1539,9 @@ class AutoSignIn(_PluginBase):
         start_time = datetime.now()
         if site_module and hasattr(site_module, "signin"):
             try:
+                site_info.setdefault("openai", self.openai)
                 state, message = site_module().signin(site_info)
+                site_info.pop("openai")
             except Exception as e:
                 traceback.print_exc()
                 state, message = False, f"签到失败：{str(e)}"

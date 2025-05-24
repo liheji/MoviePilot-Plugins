@@ -11,7 +11,6 @@ from ruamel.yaml import CommentedMap
 
 from app.core.config import settings
 from app.log import logger
-from app.plugins.autosignin.openai import OpenAi
 from app.plugins.autosignin.sites import _ISiteSigninHandler
 from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
@@ -39,23 +38,6 @@ class Tjupt(_ISiteSigninHandler):
     _answer_path = settings.TEMP_PATH / "signin/"
     _answer_file = _answer_path / "tjupt.json"
 
-    def __init__(self):
-        self.openai = None
-        chatgpt = self.get_config("ChatGPT")
-        if not chatgpt:
-            logger.error(f"ChatGPT插件未启用")
-            return
-        self._openai_key = chatgpt and chatgpt.get("openai_key")
-        self._openai_url = chatgpt and chatgpt.get("openai_url")
-        self._openai_proxy = chatgpt and chatgpt.get("proxy")
-        self._openai_model = chatgpt and chatgpt.get("model")
-        if not self._openai_key:
-            logger.error(f"ChatGPT插件未启用")
-            return
-        self.openai = OpenAi(api_key=self._openai_key, api_url=self._openai_url,
-                             proxy=settings.PROXY if self._openai_proxy else None,
-                             model=self._openai_model)
-
     @classmethod
     def match(cls, url: str) -> bool:
         """
@@ -76,6 +58,7 @@ class Tjupt(_ISiteSigninHandler):
         ua = site_info.get("ua")
         proxy = site_info.get("proxy")
         render = site_info.get("render")
+        openai = site_info.get("openai")
 
         # 创建正确答案存储目录
         if not os.path.exists(os.path.dirname(self._answer_file)):
@@ -140,9 +123,9 @@ class Tjupt(_ISiteSigninHandler):
         answers = list(zip(values, options))
         logger.debug(f"获取到所有签到选项 {answers}")
 
-        if self.openai:
+        if openai:
             base64_img = base64.b64encode(BytesIO(captcha_img_res.content).read())
-            ret, result = self.openai.get_answer_with_img(options.join("\n"), base64_img)
+            ret, result = openai.get_answer_with_img(options.join("\n"), base64_img)
             if not ret:
                 logger.error(f"{site} 签到失败，ChatGPT未返回答案")
             else:
