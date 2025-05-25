@@ -42,9 +42,7 @@ class OpenAi:
                             {"type": "text", "text": message},
                             {
                                 "type": "image_url",
-                                "image_url": {
-                                    "url": res_img_url,
-                                },
+                                "image_url": {"url": res_img_url},
                             },
                         ],
                     }
