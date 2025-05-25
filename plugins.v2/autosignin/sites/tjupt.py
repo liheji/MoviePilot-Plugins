@@ -1,7 +1,6 @@
 import base64
 import json
 import os
-import time
 from io import BytesIO
 from typing import Tuple
 
@@ -112,8 +111,8 @@ class Tjupt(_ISiteSigninHandler):
         logger.debug(f"签到图片hash {captcha_img_hash}")
 
         # 签到答案选项
-        values = html.xpath("//input[@name='answer']/@value")
-        options = html.xpath("//input[@name='answer']/following-sibling::text()")
+        values = html.xpath("//input[@name='ban_robot']/@value")
+        options = html.xpath("//input[@name='ban_robot']/following-sibling::text()")
 
         if not values or not options:
             logger.error(f"{site} 签到失败，未获取到答案选项")
@@ -123,25 +122,7 @@ class Tjupt(_ISiteSigninHandler):
         answers = list(zip(values, options))
         logger.debug(f"获取到所有签到选项 {answers}")
 
-        if openai:
-            base64_img = base64.b64encode(BytesIO(captcha_img_res.content).read())
-            ret, result = openai.get_answer_with_img(options.join("\n"), base64_img)
-            if not ret:
-                logger.error(f"{site} 签到失败，ChatGPT未返回答案")
-            else:
-                for value, answer in answers:
-                    if result and result in answer:
-                        # 确实是答案
-                        return self.__signin(
-                            answer=value,
-                            site_cookie=site_cookie,
-                            ua=ua,
-                            proxy=proxy,
-                            site=site
-                        )
-
         # 查询已有答案
-        exits_answers = {}
         try:
             with open(self._answer_file, 'r') as f:
                 json_str = f.read()
@@ -162,52 +143,24 @@ class Tjupt(_ISiteSigninHandler):
         except (FileNotFoundError, IOError, OSError) as e:
             logger.debug(f"查询本地已知答案失败：{str(e)}，继续请求豆瓣查询")
 
-        # 本地不存在正确答案则请求豆瓣查询匹配
+        if not openai:
+            logger.error(f"使用ChatGPT获取答案失败，插件未配置")
+            return False, '签到失败，未获取到匹配答案'
+
+        base64_img = base64.b64encode(BytesIO(captcha_img_res.content).read())
+        ret, result = openai.get_answer_with_img(options.join("\n"), base64_img)
+        if not ret:
+            logger.error(f"{site} 签到失败，ChatGPT未返回答案")
         for value, answer in answers:
-            if answer:
-                # 豆瓣检索
-                db_res = RequestUtils().get_res(url=f'https://movie.douban.com/j/subject_suggest?q={answer}')
-                if not db_res or db_res.status_code != 200:
-                    logger.debug(f"签到选项 {answer} 未查询到豆瓣数据")
-                    continue
-
-                # 豆瓣返回结果
-                db_answers = json.loads(db_res.text)
-                if not isinstance(db_answers, list):
-                    db_answers = [db_answers]
-
-                if len(db_answers) == 0:
-                    logger.debug(f"签到选项 {answer} 查询到豆瓣数据为空")
-
-                for db_answer in db_answers:
-                    answer_img_url = db_answer['img']
-
-                    # 获取答案hash
-                    answer_img_res = RequestUtils(referer="https://movie.douban.com").get_res(url=answer_img_url)
-                    if not answer_img_res or answer_img_res.status_code != 200:
-                        logger.debug(f"签到答案 {answer} {answer_img_url} 请求失败")
-                        continue
-
-                    answer_img = Image.open(BytesIO(answer_img_res.content))
-                    answer_img_hash = self._tohash(answer_img)
-                    logger.debug(f"签到答案图片hash {answer} {answer_img_hash}")
-
-                    # 获取选项图片与签到图片相似度，大于0.9默认是正确答案
-                    score = self._comparehash(captcha_img_hash, answer_img_hash)
-                    logger.info(f"签到图片与选项 {answer} 豆瓣图片相似度 {score}")
-                    if score > 0.9:
-                        # 确实是答案
-                        return self.__signin(answer=value,
-                                             site_cookie=site_cookie,
-                                             ua=ua,
-                                             proxy=proxy,
-                                             site=site,
-                                             exits_answers=exits_answers,
-                                             captcha_img_hash=captcha_img_hash)
-
-            # 间隔5s，防止请求太频繁被豆瓣屏蔽ip
-            time.sleep(5)
-        logger.error(f"豆瓣图片匹配，未获取到匹配答案")
+            if result.lower().strip() == answer.lower().strip():
+                # 匹配成功
+                return self.__signin(
+                    answer=value,
+                    site_cookie=site_cookie,
+                    ua=ua,
+                    proxy=proxy,
+                    site=site
+                )
 
         # 没有匹配签到成功，则签到失败
         return False, '签到失败，未获取到匹配答案'
