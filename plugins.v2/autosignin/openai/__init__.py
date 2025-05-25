@@ -19,8 +19,8 @@ class OpenAi:
 
     def __get_model(self, message: Union[str, List[dict]],
                     prompt: str = None,
-                    user: str = "MoviePilot",
                     img_url: str = None,
+                    user: str = "MoviePilot",
                     **kwargs):
         """
         获取模型

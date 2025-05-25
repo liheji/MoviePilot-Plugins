@@ -141,16 +141,18 @@ class Tjupt(_ISiteSigninHandler):
                                              proxy=proxy,
                                              site=site)
         except (FileNotFoundError, IOError, OSError) as e:
-            logger.debug(f"查询本地已知答案失败：{str(e)}，继续请求豆瓣查询")
+            logger.debug(f"查询本地已知答案失败：{str(e)}，继续请求ChatGPT")
 
         if not openai:
-            logger.error(f"使用ChatGPT获取答案失败，插件未配置")
-            return False, '签到失败，未获取到匹配答案'
+            logger.error("ChatGPT插件未配置")
+            return False, '签到失败，ChatGPT插件未配置'
 
         base64_img = base64.b64encode(BytesIO(captcha_img_res.content).read())
         ret, result = openai.get_answer_with_img(options.join("\n"), base64_img)
         if not ret:
-            logger.error(f"{site} 签到失败，ChatGPT未返回答案")
+            logger.error("ChatGPT请求失败，未返回答案")
+            return False, '签到失败，ChatGPT未返回答案'
+
         for value, answer in answers:
             if result.lower().strip() == answer.lower().strip():
                 # 匹配成功
