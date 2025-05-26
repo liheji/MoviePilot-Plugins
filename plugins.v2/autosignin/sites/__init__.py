@@ -92,7 +92,7 @@ class _ISiteSigninHandler(metaclass=ABCMeta):
         """
         判断是否签到成功
         """
-        html_text = re.sub(r"#\d+", "", re.sub(r"\d+px", "", html_res))
+        html_text = re.sub(r"#\d+", "", re.sub(r"\d+px", "", re.sub(r"\s+", "", html_res)))
         for regex in regexs:
             if re.search(str(regex), html_text):
                 return True
