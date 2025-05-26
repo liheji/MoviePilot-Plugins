@@ -147,14 +147,13 @@ class Tjupt(_ISiteSigninHandler):
             logger.error("ChatGPT插件未配置")
             return False, '签到失败，ChatGPT插件未配置'
 
-        base64_img = base64.b64encode(BytesIO(captcha_img_res.content).read())
-        ret, result = openai.get_answer_with_img(options.join("\n"), base64_img)
+        ret, result = openai.get_answer_with_img("\n".join(options), img_url)
         if not ret:
             logger.error("ChatGPT请求失败，未返回答案")
             return False, '签到失败，ChatGPT未返回答案'
 
         for value, answer in answers:
-            if result.lower().strip() == answer.lower().strip():
+            if str(result).lower().strip() == str(answer).lower().strip():
                 # 匹配成功
                 return self.__signin(
                     answer=value,
@@ -172,7 +171,7 @@ class Tjupt(_ISiteSigninHandler):
         签到请求
         """
         data = {
-            'answer': answer,
+            'ban_robot': answer,
             'submit': '提交'
         }
         logger.debug(f"提交data {data}")
