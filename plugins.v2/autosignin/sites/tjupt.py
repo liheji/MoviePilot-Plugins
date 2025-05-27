@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 from io import BytesIO
@@ -32,7 +31,7 @@ class Tjupt(_ISiteSigninHandler):
     _succeed_regex = ['这是您的首次签到，本次签到获得\\d+个魔力值。',
                       '签到成功，这是您的第\\d+次签到，已连续签到\\d+天，本次签到获得\\d+个魔力值。',
                       '重新签到成功，本次签到获得\\d+个魔力值',
-                      '今日已签到，已累计签到\\d+次，已连续签到\\d+天，今日获得了\\d+个魔力值。']
+                      '[今日已签到]']
 
     # 存储正确的答案，后续可直接查
     _answer_path = settings.TEMP_PATH / "signin/"
