@@ -27,6 +27,7 @@ from app.utils.http import RequestUtils
 from app.utils.site import SiteUtils
 from app.utils.string import StringUtils
 from app.utils.timer import TimerUtils
+from app.plugins.autosignin.openai import OpenAi
 
 
 class AutoSignIn(_PluginBase):
@@ -59,6 +60,8 @@ class AutoSignIn(_PluginBase):
     _scheduler: Optional[BackgroundScheduler] = None
     # 加载的模块
     _site_schema: list = []
+    # ChatGPT
+    _openai: OpenAi = None
 
     # 配置属性
     _enabled: bool = False
@@ -103,6 +106,21 @@ class AutoSignIn(_PluginBase):
             self._login_sites = [site_id for site_id in all_sites if site_id in self._login_sites]
             # 保存配置
             self.__update_config()
+
+        chatgpt = self.get_config("ChatGPT")
+        if chatgpt and chatgpt.get("openai_key"):
+            _openai_key = chatgpt and chatgpt.get("openai_key")
+            _openai_url = chatgpt and chatgpt.get("openai_url")
+            _openai_proxy = chatgpt and chatgpt.get("proxy")
+            _openai_model = chatgpt and chatgpt.get("model")
+            self._openai = OpenAi(
+                api_key=_openai_key,
+                api_url=_openai_url,
+                proxy=settings.PROXY if _openai_proxy else None,
+                model=_openai_model
+            )
+        else:
+            logger.error(f"ChatGPT插件未启用")
 
         # 加载模块
         if self._enabled or self._onlyonce:
@@ -1523,6 +1541,7 @@ class AutoSignIn(_PluginBase):
         start_time = datetime.now()
         if site_module and hasattr(site_module, "signin"):
             try:
+                site_info.setdefault("openai", self._openai)
                 state, message = site_module().signin(site_info)
             except Exception as e:
                 traceback.print_exc()
