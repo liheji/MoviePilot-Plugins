@@ -130,7 +130,7 @@ class Tjupt(_ISiteSigninHandler):
             # 本地存在本次hash对应的正确答案再遍历查询
             if captcha_answer:
                 for value, answer in answers:
-                    if str(captcha_answer) == str(answer):
+                    if str(captcha_answer).lower().strip() == str(answer).lower().strip():
                         # 确实是答案
                         return self.__signin(answer=value,
                                              site_cookie=site_cookie,
