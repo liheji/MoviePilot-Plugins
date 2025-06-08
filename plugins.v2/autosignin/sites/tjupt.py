@@ -157,13 +157,15 @@ class Tjupt(_ISiteSigninHandler):
                     site_cookie=site_cookie,
                     ua=ua,
                     proxy=proxy,
-                    site=site
+                    site=site,
+                    captcha_img_hash=captcha_img_hash,
+                    captcha_answer=answer
                 )
 
         # 没有匹配签到成功，则签到失败
         return False, '签到失败，未获取到匹配答案'
 
-    def __signin(self, answer, site_cookie, ua, proxy, site, exits_answers=None, captcha_img_hash=None):
+    def __signin(self, answer, site_cookie, ua, proxy, site, captcha_img_hash=None, captcha_answer=None):
         """
         签到请求
         """
@@ -185,21 +187,24 @@ class Tjupt(_ISiteSigninHandler):
                                           regexs=self._succeed_regex)
         if sign_status:
             logger.info(f"签到成功")
-            if exits_answers and captcha_img_hash:
+            if captcha_img_hash and captcha_answer:
                 # 签到成功写入本地文件
-                self.__write_local_answer(exits_answers=exits_answers or {},
-                                          captcha_img_hash=captcha_img_hash,
-                                          answer=answer)
+                self.__write_local_answer(captcha_img_hash=captcha_img_hash,
+                                          answer=captcha_answer)
             return True, '签到成功'
         else:
             logger.error(f"{site} 签到失败，请到页面查看")
             return False, '签到失败，请到页面查看'
 
-    def __write_local_answer(self, exits_answers, captcha_img_hash, answer):
+    def __write_local_answer(self, captcha_img_hash, answer):
         """
         签到成功写入本地文件
         """
         try:
+            with open(self._answer_file, 'r') as f:
+                json_str = f.read()
+            exits_answers = json.loads(json_str)
+
             exits_answers[captcha_img_hash] = answer
             # 序列化数据
             formatted_data = json.dumps(exits_answers, indent=4)
