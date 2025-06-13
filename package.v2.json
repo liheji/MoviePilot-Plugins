@@ -3,11 +3,12 @@
     "name": "站点数据统计",
     "description": "站点统计数据图表。",
     "labels": "站点,仪表板",
-    "version": "1.6",
+    "version": "1.7.1",
     "icon": "statistic.png",
     "author": "lightolly,jxxghp",
     "level": 2,
     "history": {
+      "v1.7.1": "优化内存占用",
       "v1.6": "优化了站点数据获取失败时的回退逻辑",
       "v1.5": "修复了发送增量通知失败等一些问题",
       "v1.4.1": "支持数据刷新时发送消息通知",
@@ -82,11 +83,12 @@
     "name": "媒体库服务器通知",
     "description": "发送Emby/Jellyfin/Plex服务器的播放、入库等通知消息。",
     "labels": "消息通知,媒体库",
-    "version": "1.5",
+    "version": "1.6",
     "icon": "mediaplay.png",
     "author": "jxxghp",
     "level": 1,
     "history": {
+      "v1.6": "查询剧集图片兼容没有季集信息的情况",
       "v1.5": "支持独立控制媒体服务器通知",
       "v1.4": "MoviePilot V2 版本媒体库服务器通知插件"
     }
@@ -204,13 +206,14 @@
     "name": "定时清理媒体库",
     "description": "定时清理用户下载的种子、源文件、媒体库文件。",
     "labels": "媒体库",
-    "version": "2.1",
+    "version": "2.2",
     "icon": "clean.png",
     "author": "thsrite",
     "level": 2,
     "history": {
       "v2.1": "优化执行周期输入，需要MoviePilot v2.2.1+",
-      "v2.0": "兼容MoviePilot V2 版本"
+      "v2.0": "兼容MoviePilot V2 版本",
+      "v2.2": "fix"
     }
   },
   "TorrentRemover": {
@@ -409,7 +412,7 @@
     "name": "绕过Trackers",
     "description": "提供tracker服务器IP地址列表，帮助IPv6连接绕过OpenClash",
     "labels": "工具",
-    "version": "1.4",
+    "version": "1.4.1",
     "icon": "Clash_A.png",
     "author": "wumode",
     "level": 2,
@@ -418,7 +421,8 @@
       "v1.1": "更新列表后发送通知",
       "v1.2": "修复Trackers加载错误",
       "v1.3": "新增一些Trackers",
-      "v1.4": "异步查询DNS"
+      "v1.4": "异步查询DNS",
+      "v1.4.1": "修复通知类型错误"
     }
   },
   "ImdbSource": {
@@ -447,6 +451,18 @@
     "level": 1,
     "history": {
       "v0.1.0": "新增ClashRuleProvider"
+    }
+  },
+  "LexiAnnot": {
+    "name": "美剧生词标注",
+    "description": "根据CEFR等级，为英语影视剧标注高级词汇。",
+    "labels": "英语",
+    "version": "1.0",
+    "icon": "LexiAnnot.png",
+    "author": "wumode",
+    "level": 1,
+    "history": {
+      "v1.0": "新增LexiAnnot"
     }
   }
 }
