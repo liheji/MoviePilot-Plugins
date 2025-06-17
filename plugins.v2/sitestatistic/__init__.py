@@ -32,7 +32,7 @@ class SiteStatistic(_PluginBase):
     # 插件图标
     plugin_icon = "statistic.png"
     # 插件版本
-    plugin_version = "1.7.1"
+    plugin_version = "1.8"
     # 插件作者
     plugin_author = "lightolly,jxxghp"
     # 作者主页
@@ -229,9 +229,25 @@ class SiteStatistic(_PluginBase):
             download = int(today_data_dict[site].download or 0)
             updated_date = today_data_dict[site].updated_day
 
-            if self._notify_type == "inc" and yesterday_data_dict.get(site):
-                upload -= int(yesterday_data_dict[site].upload or 0)
-                download -= int(yesterday_data_dict[site].download or 0)
+            if self._notify_type == "inc":
+                # 增量数据模式：只有当有昨天数据时才计算增量
+                if yesterday_data_dict.get(site):
+                    yesterday_upload = int(yesterday_data_dict[site].upload or 0)
+                    yesterday_download = int(yesterday_data_dict[site].download or 0)
+                    
+                    # 如果昨天上传和下载数据为0，则跳过该站点
+                    # 因为昨天数据为0时，计算出来的是累计数据而非增量
+                    if not yesterday_upload and not yesterday_download:
+                        continue
+                    
+                    upload -= yesterday_upload
+                    download -= yesterday_download
+                    # 确保增量不为负数
+                    upload = max(0, upload)
+                    download = max(0, download)
+                else:
+                    # 没有昨天数据时，跳过该站点
+                    continue
 
             if updated_date and updated_date != today_date:
                 updated_date = f"（{updated_date}）"
@@ -354,7 +370,18 @@ class SiteStatistic(_PluginBase):
             if not d1:
                 return {}
             if not d2:
-                return d1
+                # 如果没有昨天数据，返回空字典，表示无增量数据
+                return {}
+            
+            # 检查昨天的关键数据是否为0，如果是则不计算增量
+            # 因为昨天数据为0时，计算出来的是累计数据而非增量
+            for key in ['upload', 'download']:
+                if key in d2:
+                    yesterday_value = __to_numeric(d2.get(key))
+                    # 如果昨天数据为0，不计算增量
+                    if yesterday_value == 0:
+                        return {}
+            
             d = {k: __to_numeric(d1.get(k)) - __to_numeric(d2.get(k)) for k in d1
                  if k in d2 and __is_digit(d1.get(k)) and __is_digit(d2.get(k))}
             # 把小于0的数据变成0
@@ -658,14 +685,15 @@ class SiteStatistic(_PluginBase):
             # 计算增量数据集
             inc_data = {}
             for data in stattistic_data:
-                yesterday_datas = [yd for yd in yesterday_sites_data if yd.domain == data.domain]
+                # 修复：使用name进行匹配，保持一致性
+                yesterday_datas = [yd for yd in yesterday_sites_data if yd.name == data.name]
                 if yesterday_datas:
                     yesterday_data = yesterday_datas[0]
-                else:
-                    yesterday_data = None
-                inc = __sub_data(data.to_dict(), yesterday_data.to_dict() if yesterday_data else None)
-                if inc:
-                    inc_data[data.name] = inc
+                    # 只有当有昨天数据时才计算增量
+                    inc = __sub_data(data.to_dict(), yesterday_data.to_dict())
+                    if inc:
+                        inc_data[data.name] = inc
+                # 如果没有昨天数据，不添加到inc_data中
             # 今日上传
             uploads = {k: v for k, v in inc_data.items() if v.get("upload") if v.get("upload") > 0}
             # 今日上传站点
