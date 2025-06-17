@@ -22,10 +22,9 @@ class ImdbSource(_PluginBase):
     # 插件描述
     plugin_desc = "让探索和推荐支持IMDb数据源。"
     # 插件图标
-    plugin_icon = ("https://raw.githubusercontent.com/jxxghp/"
-                   "MoviePilot-Plugins/refs/heads/main/icons/IMDb_IOS-OSX_App.png")
+    plugin_icon = "IMDb_IOS-OSX_App.png"
     # 插件版本
-    plugin_version = "1.3.1"
+    plugin_version = "1.3.2"
     # 插件作者
     plugin_author = "wumode"
     # 作者主页
@@ -282,7 +281,7 @@ class ImdbSource(_PluginBase):
         return schemas.MediaInfo(
             type="电影",
             title=title,
-            year=release_year,
+            year=f'{release_year}',
             title_year=f"{title} ({release_year})",
             mediaid_prefix="imdb",
             media_id=str(movie_info.get("id")),
@@ -323,7 +322,7 @@ class ImdbSource(_PluginBase):
         return schemas.MediaInfo(
             type="电视剧",
             title=title,
-            year=release_year,
+            year=f'{release_year}',
             title_year=f"{title} ({release_year})",
             mediaid_prefix="imdb",
             media_id=str(series_info.get("id")),
