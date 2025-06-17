@@ -60,6 +60,7 @@ class SiteStatistic(_PluginBase):
         if config:
             self._enabled = config.get("enabled")
             self._onlyonce = config.get("onlyonce")
+            self._exclude_deleted = config.get("exclude_deleted") or False
             self._dashboard_type = config.get("dashboard_type") or "today"
             self._notify_type = config.get("notify_type") or ""
 
@@ -138,6 +139,22 @@ class SiteStatistic(_PluginBase):
                                     {
                                         'component': 'VSwitch',
                                         'props': {
+                                            'model': 'exclude_deleted',
+                                            'label': '排除已删除站点',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
                                             'model': 'onlyonce',
                                             'label': '立即运行一次',
                                         }
@@ -198,6 +215,7 @@ class SiteStatistic(_PluginBase):
         ], {
             "enabled": False,
             "onlyonce": False,
+            "exclude_deleted": False,
             "dashboard_type": 'today'
         }
 
@@ -273,8 +291,7 @@ class SiteStatistic(_PluginBase):
             self.post_message(mtype=NotificationType.SiteMessage,
                               title="站点数据统计", text="\n".join(sorted_messages))
 
-    @staticmethod
-    def __get_data() -> Tuple[str, List[SiteUserData], List[SiteUserData]]:
+    def __get_data(self) -> Tuple[str, List[SiteUserData], List[SiteUserData]]:
         """
         获取最近一次统计的日期、最近一次统计的站点数据、上一次的站点数据
         如果上一次某个站点数据缺失，则 fallback 到该站点之前最近有数据的日期
@@ -283,6 +300,12 @@ class SiteStatistic(_PluginBase):
         latest_data: List[SiteUserData] = SiteOper().get_userdata_latest()
         if not latest_data:
             return "", [], []
+
+        if self._exclude_deleted:
+            exit_site: List[str] = []
+            for site in SiteOper().list():
+                exit_site.append(site.name)
+            latest_data = [data for data in latest_data if data.name in exit_site]
 
         # 获取最新日期（用于显示）
         latest_day = max(data.updated_day for data in latest_data)
