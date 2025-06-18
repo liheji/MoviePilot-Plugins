@@ -98,10 +98,10 @@ class AutoSignIn(_PluginBase):
 
         chatgpt = self.get_config("ChatGPT")
         if chatgpt and chatgpt.get("openai_key"):
-            _openai_key = chatgpt and chatgpt.get("openai_key")
-            _openai_url = chatgpt and chatgpt.get("openai_url")
-            _openai_proxy = chatgpt and chatgpt.get("proxy")
-            _openai_model = chatgpt and chatgpt.get("model")
+            _openai_key = chatgpt.get("openai_key")
+            _openai_url = chatgpt.get("openai_url") if chatgpt.get("openai_url") else "https://api.openai.com"
+            _openai_proxy = chatgpt.get("proxy")
+            _openai_model = chatgpt.get("model") if chatgpt.get("model") else "gpt-4o"
             self._openai = OpenAi(
                 api_key=_openai_key,
                 api_url=_openai_url,

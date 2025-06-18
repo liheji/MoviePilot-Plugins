@@ -1,6 +1,3 @@
-import json
-import os
-from io import BytesIO
 from typing import Tuple
 
 from PIL import Image
@@ -30,10 +27,6 @@ class Tjupt(_ISiteSigninHandler):
     # 签到成功
     _succeed_regex = ['[今日已签到]']
 
-    # 存储正确的答案，后续可直接查
-    _answer_path = settings.TEMP_PATH / "signin/"
-    _answer_file = _answer_path / "tjupt.json"
-
     @classmethod
     def match(cls, url: str) -> bool:
         """
@@ -55,10 +48,6 @@ class Tjupt(_ISiteSigninHandler):
         proxy = site_info.get("proxy")
         render = site_info.get("render")
         openai = site_info.get("openai")
-
-        # 创建正确答案存储目录
-        if not os.path.exists(os.path.dirname(self._answer_file)):
-            os.makedirs(os.path.dirname(self._answer_file))
 
         # 获取北洋签到页面html
         html_text = self.get_page_source(url=self._sign_in_url,
@@ -95,17 +84,6 @@ class Tjupt(_ISiteSigninHandler):
         # 签到图片
         img_url = "https://www.tjupt.org" + img_url
         logger.info(f"获取到签到图片 {img_url}")
-        # 获取签到图片hash
-        captcha_img_res = RequestUtils(cookies=site_cookie,
-                                       ua=ua,
-                                       proxies=settings.PROXY if proxy else None
-                                       ).get_res(url=img_url)
-        if not captcha_img_res or captcha_img_res.status_code != 200:
-            logger.error(f"{site} 签到图片 {img_url} 请求失败")
-            return False, '签到失败，未获取到签到图片'
-        captcha_img = Image.open(BytesIO(captcha_img_res.content))
-        captcha_img_hash = self._tohash(captcha_img)
-        logger.debug(f"签到图片hash {captcha_img_hash}")
 
         # 签到答案选项
         values = html.xpath("//input[@name='ban_robot']/@value")
@@ -117,28 +95,7 @@ class Tjupt(_ISiteSigninHandler):
 
         # value+选项
         answers = list(zip(values, options))
-        logger.debug(f"获取到所有签到选项 {answers}")
-
-        # 查询已有答案
-        try:
-            with open(self._answer_file, 'r') as f:
-                json_str = f.read()
-            exits_answers = json.loads(json_str)
-            # 查询本地本次验证码hash答案
-            captcha_answer = exits_answers[captcha_img_hash]
-
-            # 本地存在本次hash对应的正确答案再遍历查询
-            if captcha_answer:
-                for value, answer in answers:
-                    if str(captcha_answer).lower().strip() == str(answer).lower().strip():
-                        # 确实是答案
-                        return self.__signin(answer=value,
-                                             site_cookie=site_cookie,
-                                             ua=ua,
-                                             proxy=proxy,
-                                             site=site)
-        except (FileNotFoundError, IOError, OSError) as e:
-            logger.debug(f"查询本地已知答案失败：{str(e)}，继续请求ChatGPT")
+        logger.info(f"获取到所有签到选项 {answers}")
 
         if not openai:
             logger.error("ChatGPT插件未配置")
@@ -157,15 +114,13 @@ class Tjupt(_ISiteSigninHandler):
                     site_cookie=site_cookie,
                     ua=ua,
                     proxy=proxy,
-                    site=site,
-                    captcha_img_hash=captcha_img_hash,
-                    captcha_answer=answer
+                    site=site
                 )
 
         # 没有匹配签到成功，则签到失败
         return False, '签到失败，未获取到匹配答案'
 
-    def __signin(self, answer, site_cookie, ua, proxy, site, captcha_img_hash=None, captcha_answer=None):
+    def __signin(self, answer, site_cookie, ua, proxy, site):
         """
         签到请求
         """
@@ -187,63 +142,7 @@ class Tjupt(_ISiteSigninHandler):
                                           regexs=self._succeed_regex)
         if sign_status:
             logger.info(f"签到成功")
-            if captcha_img_hash and captcha_answer:
-                # 签到成功写入本地文件
-                self.__write_local_answer(captcha_img_hash=captcha_img_hash,
-                                          answer=captcha_answer)
             return True, '签到成功'
         else:
             logger.error(f"{site} 签到失败，请到页面查看")
             return False, '签到失败，请到页面查看'
-
-    def __write_local_answer(self, captcha_img_hash, answer):
-        """
-        签到成功写入本地文件
-        """
-        try:
-            with open(self._answer_file, 'r') as f:
-                json_str = f.read()
-            exits_answers = json.loads(json_str)
-
-            exits_answers[captcha_img_hash] = answer
-            # 序列化数据
-            formatted_data = json.dumps(exits_answers, indent=4)
-            with open(self._answer_file, 'w') as f:
-                f.write(formatted_data)
-        except (FileNotFoundError, IOError, OSError) as e:
-            logger.debug(f"签到成功写入本地文件失败：{str(e)}")
-
-    @staticmethod
-    def _tohash(img, shape=(10, 10)):
-        """
-        获取图片hash
-        """
-        img = img.resize(shape)
-        gray = img.convert('L')
-        s = 0
-        hash_str = ''
-        for i in range(shape[1]):
-            for j in range(shape[0]):
-                s = s + gray.getpixel((j, i))
-        avg = s / (shape[0] * shape[1])
-        for i in range(shape[1]):
-            for j in range(shape[0]):
-                if gray.getpixel((j, i)) > avg:
-                    hash_str = hash_str + '1'
-                else:
-                    hash_str = hash_str + '0'
-        return hash_str
-
-    @staticmethod
-    def _comparehash(hash1, hash2, shape=(10, 10)):
-        """
-        比较图片hash
-        返回相似度
-        """
-        n = 0
-        if len(hash1) != len(hash2):
-            return -1
-        for i in range(len(hash1)):
-            if hash1[i] == hash2[i]:
-                n = n + 1
-        return n / (shape[0] * shape[1])
