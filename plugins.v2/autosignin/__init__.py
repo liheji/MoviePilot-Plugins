@@ -1365,6 +1365,12 @@ class AutoSignIn(_PluginBase):
             logger.info(f"没有需要{type_str}的站点")
             return
 
+        try:
+            # 将北洋园提到最前面
+            do_sites.sort(key=lambda x: 0 if x.get("name") == "北洋园" else 1)
+        except:
+            pass
+
         # 执行签到
         logger.info(f"开始执行{type_str}任务 ...")
         if type_str == "签到":
