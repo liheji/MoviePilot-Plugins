@@ -49,6 +49,10 @@ class Tjupt(_ISiteSigninHandler):
         render = site_info.get("render")
         openai = site_info.get("openai")
 
+        if not openai:
+            logger.error("ChatGPT插件未配置")
+            return False, '签到失败，ChatGPT插件未配置'
+
         # 获取北洋签到页面html
         html_text = self.get_page_source(url=self._sign_in_url,
                                          cookie=site_cookie,
@@ -96,10 +100,6 @@ class Tjupt(_ISiteSigninHandler):
         # value+选项
         answers = list(zip(values, options))
         logger.info(f"获取到所有签到选项 {answers}")
-
-        if not openai:
-            logger.error("ChatGPT插件未配置")
-            return False, '签到失败，ChatGPT插件未配置'
 
         ret, result = openai.get_answer_with_img("\n".join(options), img_url)
         if not ret:
