@@ -99,7 +99,7 @@ class Tjupt(_ISiteSigninHandler):
 
         # value+选项
         answers = list(zip(values, options))
-        logger.info(f"获取到所有签到选项 {answers}")
+        logger.info(f"获取到所有签到选项 {options}")
 
         ret, result = openai.get_answer_with_img("\n".join(options), img_url)
         if not ret:
@@ -141,7 +141,7 @@ class Tjupt(_ISiteSigninHandler):
         sign_status = self.sign_in_result(html_res=sign_in_res.text,
                                           regexs=self._succeed_regex)
         if sign_status:
-            logger.info(f"签到成功")
+            logger.info(f"{site} 签到成功")
             return True, '签到成功'
         else:
             logger.error(f"{site} 签到失败，请到页面查看")
