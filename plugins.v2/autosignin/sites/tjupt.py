@@ -106,6 +106,7 @@ class Tjupt(_ISiteSigninHandler):
             logger.error("ChatGPT请求失败，未返回答案")
             return False, '签到失败，ChatGPT未返回答案'
 
+        logger.info(f"ChatGPT返回答案 {result}")
         for value, answer in answers:
             if str(result).lower().strip() == str(answer).lower().strip():
                 # 匹配成功
