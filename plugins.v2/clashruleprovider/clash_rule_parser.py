@@ -2,9 +2,62 @@ import re
 from typing import List, Dict, Any, Optional, Union, Callable, Literal
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import urlparse, parse_qs, unquote, parse_qsl, urlencode, urlunparse
+import json
+import base64
+import binascii
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, HttpUrl
 
+
+class RuleProvider(BaseModel):
+    type: Literal["http", "file", "inline"] = Field(..., description="Provider type")
+    url: Optional[HttpUrl] = Field(None, description="Must be configured if the type is http")
+    path: Optional[str] = Field(None, description="Optional, file path, must be unique.")
+    interval: Optional[int] = Field(None, ge=0, description="The update interval for the provider, in seconds.")
+    proxy: Optional[str] = Field(None, description="Download/update through the specified proxy.")
+    behavior: Optional[Literal["domain", "ipcidr", "classical"]] = Field(None,
+                                                                         description="Behavior of the rule provider")
+    format: Literal["yaml", "text", "mrs"] = Field("yaml", description="Format of the rule provider file")
+    size_limit: int = Field(0, ge=0, description="The maximum size of downloadable files in bytes (0 for no limit)")
+    payload: Optional[List[str]] = Field(None, description="Content, only effective when type is inline")
+
+    @validator("url", pre=True, always=True, allow_reuse=True)
+    def check_url_for_http_type(cls, v, values):
+        if values.get("type") == "http" and v is None:
+            raise ValueError("url must be configured if the type is 'http'")
+        return v
+
+    @validator("path", pre=True, always=True, allow_reuse=True)
+    def check_path_for_file_type(cls, v, values):
+        if values.get("type") == "file" and v is None:
+            raise ValueError("path must be configured if the type is 'file'")
+        return v
+
+    @validator("payload", pre=True, always=True, allow_reuse=True)
+    def handle_payload_for_non_inline_type(cls, v, values):
+        # If type is not inline, payload should be ignored (set to None)
+        if values.get("type") != "inline" and v is not None:
+            return None
+        return v
+
+    @validator("payload", allow_reuse=True)
+    def check_payload_type_for_inline(cls, v, values):
+        if values.get("type") == "inline" and v is not None and not isinstance(v, list):
+            raise ValueError("payload must be a list of strings when type is 'inline'")
+        if values.get("type") == "inline" and v is None:
+            raise ValueError("payload must be configured if the type is 'inline'")
+        return v
+
+    @validator("format", allow_reuse=True)
+    def check_format_with_behavior(cls, v, values):
+        behavior = values.get("behavior")
+        if v == "mrs" and behavior not in ["domain", "ipcidr"]:
+            raise ValueError("mrs format only supports 'domain' or 'ipcidr' behavior")
+        return v
+
+class RuleProviders(BaseModel):
+    __root__: dict[str, RuleProvider]
 
 class ProxyGroupBase(BaseModel):
     """
@@ -45,7 +98,7 @@ class ProxyGroupBase(BaseModel):
     icon: Optional[str] = Field(None, description="Icon string for the proxy group, for UI use.")
 
 
-    @validator('expected_status')
+    @validator('expected_status', allow_reuse=True)
     def validate_expected_status(cls, v: Optional[str]) -> Optional[str]:
         if v is None or v == '*':
             return v
@@ -85,11 +138,7 @@ class LoadBalanceGroup(ProxyGroupBase):
 # --- Discriminated Union ---
 ProxyGroupUnion = Union[SelectGroup, RelayGroup, FallbackGroup, UrlTestGroup, LoadBalanceGroup]
 
-class ProxyGroupValidator(BaseModel):
-    """
-    这是Pydantic V1的验证器。
-    它使用 __root__ 字段来处理可辨识联合。
-    """
+class ProxyGroup(BaseModel):
     __root__: ProxyGroupUnion
 
 class RuleType(Enum):
@@ -212,7 +261,6 @@ class ClashRuleParser:
             return ClashRuleParser._parse_regular_rule(line)
 
         except Exception as e:
-            print(f"Error parsing rule '{line}': {e}")
             return None
 
     @staticmethod
@@ -228,13 +276,16 @@ class ClashRuleParser:
                 conditions_str += f'({condition.get("type")},{condition.get("payload")})'
             conditions_str = f"({conditions_str})"
             raw_rule = f"{clash_rule.get('type')},{conditions_str},{clash_rule.get('action')}"
-            return ClashRuleParser._parse_logic_rule(raw_rule)
+            rule = ClashRuleParser._parse_logic_rule(raw_rule)
         elif clash_rule.get("type") == 'MATCH':
             raw_rule = f"{clash_rule.get('type')},{clash_rule.get('action')}"
-            return ClashRuleParser._parse_match_rule(raw_rule)
+            rule = ClashRuleParser._parse_match_rule(raw_rule)
         else:
             raw_rule = f"{clash_rule.get('type')},{clash_rule.get('payload')},{clash_rule.get('action')}"
-            return ClashRuleParser._parse_regular_rule(raw_rule)
+            rule = ClashRuleParser._parse_regular_rule(raw_rule)
+        if rule and 'priority' in clash_rule:
+            rule.priority = clash_rule['priority']
+        return rule
 
     @staticmethod
     def _parse_match_rule(line: str) -> MatchRule:
@@ -339,7 +390,7 @@ class ClashRuleParser:
                 )
                 conditions.append(condition)
             except ValueError:
-                print(f"Unknown rule type in logic condition: {rule_type_str}")
+                continue
 
         return conditions
 
@@ -396,7 +447,7 @@ class ClashRuleParser:
         except Exception:
             return False
 
-    def to_string(self) -> List[str]:
+    def to_list(self) -> List[str]:
         result = []
         for rule in self.rules:
             result.append(rule.raw_rule)
@@ -478,12 +529,19 @@ class ClashRuleParser:
         self.rules.sort(key=lambda r: r.priority)
 
     def update_rule_at_priority(self, clash_rule: Union[ClashRule, LogicRule], priority: int) -> bool:
-        for index, existing_rule in enumerate(self.rules):
-            if existing_rule.priority == priority:
-                self.rules[index] = clash_rule
-                self.rules[index].priority = priority
-                return True
-        return False
+        if clash_rule.priority == priority:
+            for index, existing_rule in enumerate(self.rules):
+                if existing_rule.priority == priority:
+                    self.rules[index] = clash_rule
+                    self.rules[index].priority = priority
+                    return True
+            return False
+        else:
+            removed = self.remove_rule_at_priority(priority)
+            if not removed:
+                return False
+            self.insert_rule_at_priority(clash_rule, clash_rule.priority)
+            return True
 
     def remove_rule_at_priority(self, priority: int) -> Optional[Union[ClashRule, LogicRule, MatchRule]]:
         """Remove rule at specific priority and adjust remaining priorities"""
@@ -581,3 +639,548 @@ class ClashRuleParser:
             for i in range(target_index, moved_index):
                 self.rules[i].priority += 1
         self.rules.sort(key=lambda x: x.priority)
+
+
+class Converter:
+    """
+    Converter for V2Ray Subscription
+
+    Reference:
+    https://github.com/MetaCubeX/mihomo/blob/Alpha/common/convert/converter.go
+    https://github.com/SubConv/SubConv/blob/main/modules/convert/converter.py
+    """
+    @staticmethod
+    def decode_base64(data):
+        # 添加适配不同 padding 的容错机制
+        data = data.strip()
+        missing_padding = len(data) % 4
+        if missing_padding:
+            data += '=' * (4 - missing_padding)
+        return base64.b64decode(data)
+
+    @staticmethod
+    def try_decode_base64_json(data):
+        try:
+            return json.loads(Converter.decode_base64(data).decode('utf-8'))
+        except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, TypeError):
+            return None
+
+    @staticmethod
+    def unique_name(name_map, name):
+        index = name_map.get(name, 0)
+        name_map[name] = index + 1
+        if index > 0:
+            return f"{name}-{index:02d}"
+        return name
+
+    @staticmethod
+    def strtobool(val):
+        val = val.lower()
+        if val in ("y", "yes", "t", "true", "on", "1"):
+            return True
+        elif val in ("n", "no", "f", "false", "off", "0"):
+            return False
+        else:
+            raise ValueError(f"invalid truth value {val!r}")
+
+    @staticmethod
+    def convert_v2ray(v2ray_link: Union[list, bytes]) -> List[Dict[str, Any]]:
+        if isinstance(v2ray_link, bytes):
+            decoded = Converter.decode_base64(v2ray_link).decode("utf-8")
+            lines = decoded.strip().splitlines()
+        else:
+            lines = v2ray_link
+        proxies = []
+        names = {}
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            if "://" not in line:
+                continue
+
+            scheme, body = line.split("://", 1)
+            scheme = scheme.lower()
+
+            if scheme == "vmess":
+                vmess_data = Converter.try_decode_base64_json(body)
+                if not vmess_data:
+                    continue
+
+                name = Converter.unique_name(names, vmess_data.get("ps", "vmess"))
+                net = str(vmess_data.get("net", "")).lower()
+                fake_type = str(vmess_data.get("type", "")).lower()
+                tls_mode = str(vmess_data.get("tls", "")).lower()
+                cipher = vmess_data.get("scy", "auto") or "auto"
+                alter_id = vmess_data.get("aid", 0)
+
+                # 调整 network 类型
+                if fake_type == "http":
+                    net = "http"
+                elif net == "http":
+                    net = "h2"
+
+                proxy = {
+                    "name": name,
+                    "type": "vmess",
+                    "server": vmess_data.get("add"),
+                    "port": vmess_data.get("port"),
+                    "uuid": vmess_data.get("id"),
+                    "alterId": alter_id,
+                    "cipher": cipher,
+                    "tls": tls_mode.endswith("tls") or tls_mode == "reality",
+                    "udp": True,
+                    "xudp": True,
+                    "skip-cert-verify": False,
+                    "network": net
+                }
+
+                # TLS、Reality 扩展
+                if proxy["tls"]:
+                    proxy["client-fingerprint"] = vmess_data.get("fp", "chrome") or "chrome"
+                    alpn = vmess_data.get("alpn")
+                    if alpn:
+                        proxy["alpn"] = alpn.split(",") if isinstance(alpn, str) else alpn
+                    sni = vmess_data.get("sni")
+                    if sni:
+                        proxy["servername"] = sni
+
+                    if tls_mode == "reality":
+                        proxy["reality-opts"] = {
+                            "public-key": vmess_data.get("pbk", ""),
+                            "short-id": vmess_data.get("sid", "")
+                        }
+
+                path = vmess_data.get("path", "/")
+                host = vmess_data.get("host")
+
+                # 不同 network 的扩展字段处理
+                if net == "tcp":
+                    if fake_type == "http":
+                        proxy["http-opts"] = {
+                            "path": path,
+                            "headers": {"Host": host} if host else {}
+                        }
+                elif net == "http":
+                    proxy["network"] = "http"
+                    proxy["http-opts"] = {
+                        "path": path,
+                        "headers": {"Host": host} if host else {}
+                    }
+                elif net == "h2":
+                    proxy["h2-opts"] = {
+                        "path": path,
+                        "host": [host] if host else []
+                    }
+
+                elif net == "ws":
+                    ws_headers = {"Host": host} if host else {}
+                    ws_headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"  # 可选伪装
+                    ws_opts = {
+                        "path": path,
+                        "headers": ws_headers
+                    }
+                    # 补充 early-data 配置
+                    early_data = vmess_data.get("ed")
+                    if early_data:
+                        try:
+                            ws_opts["max-early-data"] = int(early_data)
+                        except ValueError:
+                            pass
+                    early_data_header = vmess_data.get("edh")
+                    if early_data_header:
+                        ws_opts["early-data-header-name"] = early_data_header
+                    proxy["ws-opts"] = ws_opts
+
+                elif net == "grpc":
+                    proxy["grpc-opts"] = {
+                        "grpc-service-name": path
+                    }
+                proxies.append(proxy)
+            elif scheme == "vless":
+                try:
+                    parsed = urlparse(line)
+                    query = parse_qs(parsed.query)
+                    uuid = parsed.username or ""
+                    server = parsed.hostname or ""
+                    port = parsed.port or 443
+                    tls_mode = query.get("security", [""])[0].lower()
+                    tls = tls_mode == "tls" or tls_mode == "reality"
+                    sni = query.get("sni", [""])[0]
+                    flow = query.get("flow", [""])[0]
+                    network = query.get("type", [""])[0]
+                    path = query.get("path", [""])[0]
+                    host = query.get("host", [""])[0]
+                    name = Converter.unique_name(names, unquote(parsed.fragment or f"{server}:{port}"))
+
+                    proxy = {
+                        "name": name,
+                        "type": "vless",
+                        "server": server,
+                        "port": str(port),
+                        "uuid": uuid,
+                        "tls": tls,
+                        "udp": True
+                    }
+
+                    if sni:
+                        proxy["sni"] = sni
+                    if flow:
+                        proxy["flow"] = flow
+
+                    if network:
+                        proxy["network"] = network
+                        if network in ["ws", "httpupgrade"]:
+                            headers = {}
+                            if host:
+                                headers["Host"] = host
+                            ws_opts:Dict[str, Any] = { "path": path, "headers": headers }
+                            try:
+                                parsed_path = urlparse(path)
+                                q = parse_qs(parsed_path.query)
+                                if "ed" in q:
+                                    med = int(q["ed"][0])
+                                    ws_opts["max-early-data"] = med
+                                    ws_opts["early-data-header-name"] = q.get("eh", ["Sec-WebSocket-Protocol"])[0]
+                                    q.pop("ed", None)
+                                    new_query = urlencode(q, doseq=True)
+                                    parsed = parsed._replace(query=new_query)
+                                    path = urlunparse(parsed)
+                                elif "eh" in q:
+                                    ws_opts["early-data-header-name"] = q["eh"][0]
+                                ws_opts["path"] = path
+                            except Exception:
+                                pass
+                            if network == "httpupgrade":
+                                ws_opts["v2ray-http-upgrade-fast-open"] = True
+                            proxy["ws-opts"] = ws_opts
+                        elif network == "grpc":
+                            proxy["grpc-opts"] = {
+                                "grpc-service-name": path
+                            }
+
+                    if tls_mode == "reality":
+                        proxy["reality-opts"] = {
+                            "public-key": query.get("pbk", [""])[0]
+                        }
+                        if query.get("sid"):
+                            proxy["reality-opts"]["short-id"] = query.get("sid", [""])[0]
+                        proxy["client-fingerprint"] = query.get("fp", ["chrome"])[0]
+                        alpn = query.get("alpn", [""])[0]
+                        if alpn:
+                            proxy["alpn"] = alpn.split(",")
+                    proxies.append(proxy)
+
+                except Exception as e:
+                    raise ValueError(f"VLESS parse error: {e}") from e
+
+            elif scheme == "trojan":
+                try:
+                    parsed = urlparse(line)
+                    query = dict(parse_qsl(parsed.query))
+
+                    name = Converter.unique_name(names, unquote(parsed.fragment or f"{parsed.hostname}:{parsed.port}"))
+
+                    trojan = {
+                        "name": name,
+                        "type": "trojan",
+                        "server": parsed.hostname,
+                        "port": parsed.port or 443,
+                        "password": parsed.username or "",
+                        "udp": True,
+                    }
+
+                    # skip-cert-verify
+                    try:
+                        trojan["skip-cert-verify"] = Converter.strtobool(query.get("allowInsecure", "0"))
+                    except ValueError:
+                        trojan["skip-cert-verify"] = False
+
+                    # optional fields
+                    if "sni" in query:
+                        trojan["sni"] = query["sni"]
+
+                    alpn = query.get("alpn", "")
+                    if alpn:
+                        trojan["alpn"] = alpn.split(",")
+
+                    network = query.get("type", "").lower()
+                    if network:
+                        trojan["network"] = network
+
+                    if network == "ws":
+                        headers = {"User-Agent": "clash"}  # 或 RandUserAgent()
+                        trojan["ws-opts"] = {
+                            "path": query.get("path", "/"),
+                            "headers": headers
+                        }
+
+                    elif network == "grpc":
+                        trojan["grpc-opts"] = {
+                            "grpc-service-name": query.get("serviceName", "")
+                        }
+
+                    fp = query.get("fp", "")
+                    trojan["client-fingerprint"] = fp if fp else "chrome"
+
+                    proxies.append(trojan)
+
+                except Exception as e:
+                    raise ValueError(f"Error parsing trojan:// link: {e}") from e
+            elif scheme == "hysteria":
+                try:
+                    parsed = urlparse(line)
+                    query = dict(parse_qsl(parsed.query))
+
+                    name = Converter.unique_name(names, unquote(parsed.fragment or f"{parsed.hostname}:{parsed.port}"))
+                    hysteria = {
+                        "name": name,
+                        "type": "hysteria",
+                        "server": parsed.hostname,
+                        "port": parsed.port,
+                        "auth_str": parsed.username or query.get("auth", ""),
+                        "obfs": query.get("obfs", ""),
+                        "sni": query.get("peer", ""),
+                        "protocol": query.get("protocol", "")
+                    }
+
+                    up = query.get("up", "")
+                    down = query.get("down", "")
+                    if not up:
+                        up = query.get("upmbps", "")
+                    if not down:
+                        down = query.get("downmbps", "")
+                    hysteria["up"] = up
+                    hysteria["down"] = down
+
+                    # alpn split
+                    alpn = query.get("alpn", "")
+                    if alpn:
+                        hysteria["alpn"] = alpn.split(",")
+
+                    # skip-cert-verify
+                    try:
+                        hysteria["skip-cert-verify"] = Converter.strtobool(query.get("insecure", "false"))
+                    except ValueError:
+                        hysteria["skip-cert-verify"] = False
+
+                    proxies.append(hysteria)
+                except Exception as e:
+                    raise ValueError(f"Hysteria parse error: {e}") from e
+            elif scheme in ("socks", "socks5", "socks5h"):
+                try:
+                    parsed = urlparse(line)
+                    server = parsed.hostname
+                    port = parsed.port
+                    username = parsed.username or ""
+                    password = parsed.password or ""
+                    name = Converter.unique_name(names, unquote(parsed.fragment or f"{server}:{port}"))
+
+                    proxy = {
+                        "name": name,
+                        "type": "socks5",
+                        "server": server,
+                        "port": str(port),
+                        "username": username,
+                        "password": password,
+                        "udp": True
+                    }
+                    proxies.append(proxy)
+                except Exception as e:
+                    raise ValueError(f"SOCKS5 parse error: {e}") from e
+            elif scheme == "ss":
+                try:
+                    parsed = urlparse(line)
+                    # 兼容 ss://base64 或 ss://base64#name
+                    if parsed.fragment:
+                        name = Converter.unique_name(names, unquote(parsed.fragment))
+                    else:
+                        name = Converter.unique_name(names, "ss")
+                    if parsed.port is None:
+                        base64_body = body.split("#")[0]
+                        parsed = urlparse(f"ss://{Converter.decode_base64(base64_body).decode('utf-8')}")
+                    cipher_raw = parsed.username
+                    cipher = cipher_raw
+                    password = parsed.password
+                    if not password:
+                        dc_buf = Converter.decode_base64(cipher_raw).decode('utf-8')
+                        if dc_buf.startswith("ss://"):
+                            dc_buf = dc_buf[len("ss://"):]
+                        dc_buf = Converter.decode_base64(dc_buf).decode('utf-8')
+                        cipher, password = dc_buf.split(":", 1)
+                    server = parsed.hostname
+                    port = parsed.port
+                    query = dict(parse_qsl(parsed.query))
+                    proxy = {
+                        "name": name,
+                        "type": "ss",
+                        "server": server,
+                        "port": port,
+                        "cipher": cipher,
+                        "password": password,
+                        "udp": True
+                    }
+                    plugin = query.get("plugin")
+                    if plugin and ";" in plugin:
+                        query_string = "pluginName=" + plugin.replace(";", "&")
+                        plugin_info = parse_qs(query_string)
+                        plugin_name = plugin_info.get("pluginName", [""])[0]
+
+                        if "obfs" in plugin_name:
+                            proxy["plugin"] = "obfs"
+                            proxy["plugin-opts"] = {
+                                "mode": plugin_info.get("obfs", [""])[0],
+                                "host": plugin_info.get("obfs-host", [""])[0],
+                            }
+                        elif "v2ray-plugin" in plugin_name:
+                            proxy["plugin"] = "v2ray-plugin"
+                            proxy["plugin-opts"] = {
+                                "mode": plugin_info.get("mode", [""])[0],
+                                "host": plugin_info.get("host", [""])[0],
+                                "path": plugin_info.get("path", [""])[0],
+                                "tls": "tls" in plugin,
+                            }
+                    proxies.append(proxy)
+                except Exception as e:
+                    raise ValueError(f"SS parse error: {e}") from e
+            elif scheme == "ssr":
+                try:
+                    decoded = Converter.decode_base64(body).decode()
+                    parts, _, params_str = decoded.partition("/?")
+                    host, port, protocol, method, obfs, password_enc = parts.split(":")
+
+                    password = Converter.decode_base64(password_enc).decode()
+                    params = parse_qs(params_str)
+
+                    remarks = Converter.decode_base64(params.get("remarks", [""])[0]).decode()
+                    obfsparam = Converter.decode_base64(params.get("obfsparam", [""])[0]).decode()
+                    protoparam = Converter.decode_base64(params.get("protoparam", [""])[0]).decode()
+
+                    name = Converter.unique_name(names, remarks or f"{host}:{port}")
+
+                    proxy = {
+                        "name": name,
+                        "type": "ssr",
+                        "server": host,
+                        "port": port,
+                        "cipher": method,
+                        "password": password,
+                        "obfs": obfs,
+                        "protocol": protocol,
+                        "udp": True
+                    }
+
+                    if obfsparam:
+                        proxy["obfs-param"] = obfsparam
+                    if protoparam:
+                        proxy["protocol-param"] = protoparam
+
+                    proxies.append(proxy)
+                except Exception as e:
+                    raise ValueError(f"SSR parse error: {e}") from e
+            elif scheme == "tuic":
+                try:
+                    parsed = urlparse(line)
+                    query = parse_qs(parsed.query)
+
+                    user = parsed.username or ""
+                    password = parsed.password or ""
+                    server = parsed.hostname
+                    port = parsed.port or 443
+
+                    name = Converter.unique_name(names, unquote(parsed.fragment or f"{server}:{port}"))
+                    proxy = {
+                        "name": name,
+                        "type": "tuic",
+                        "server": server,
+                        "port": str(port),
+                        "udp": True
+                    }
+
+                    if password:
+                        proxy["uuid"] = user
+                        proxy["password"] = password
+                    else:
+                        proxy["token"] = user
+
+                    if "congestion_control" in query:
+                        proxy["congestion-controller"] = query["congestion_control"][0]
+                    if "alpn" in query:
+                        proxy["alpn"] = query["alpn"][0].split(",")
+                    if "sni" in query:
+                        proxy["sni"] = query["sni"][0]
+                    if query.get("disable_sni", ["0"])[0] == "1":
+                        proxy["disable-sni"] = True
+                    if "udp_relay_mode" in query:
+                        proxy["udp-relay-mode"] = query["udp_relay_mode"][0]
+
+                    proxies.append(proxy)
+                except Exception as e:
+                    raise ValueError(f"TUIC parse error: {e}") from e
+            elif scheme == "anytls":
+                try:
+                    parsed = urlparse(line)
+                    query = parse_qs(parsed.query)
+
+                    username = parsed.username or ""
+                    password = parsed.password or username
+                    server = parsed.hostname
+                    port = parsed.port
+                    insecure = query.get("insecure", ["0"])[0] == "1"
+                    sni = query.get("sni", [""])[0]
+                    fingerprint = query.get("hpkp", [""])[0]
+
+                    name = Converter.unique_name(names, unquote(parsed.fragment or f"{server}:{port}"))
+                    proxy = {
+                        "name": name,
+                        "type": "anytls",
+                        "server": server,
+                        "port": str(port),
+                        "username": username,
+                        "password": password,
+                        "sni": sni,
+                        "fingerprint": fingerprint,
+                        "skip-cert-verify": insecure,
+                        "udp": True
+                    }
+
+                    proxies.append(proxy)
+                except Exception as e:
+                    raise ValueError(f"AnyTLS parse error: {e}") from e
+            elif scheme in ("hysteria2", "hy2"):
+                try:
+                    parsed = urlparse(line)
+                    query = parse_qs(parsed.query)
+
+                    password = parsed.username or ""
+                    server = parsed.hostname
+                    port = parsed.port or 443
+
+                    name = Converter.unique_name(names, unquote(parsed.fragment or f"{server}:{port}"))
+                    proxy = {
+                        "name": name,
+                        "type": "hysteria2",
+                        "server": server,
+                        "port": str(port),
+                        "password": password,
+                        "obfs": query.get("obfs", [""])[0],
+                        "obfs-password": query.get("obfs-password", [""])[0],
+                        "sni": query.get("sni", [""])[0],
+                        "skip-cert-verify": query.get("insecure", ["false"])[0] == "true",
+                        "down": query.get("down", [""])[0],
+                        "up": query.get("up", [""])[0],
+                        "fingerprint": query.get("pinSHA256", [""])[0]
+                    }
+
+                    if "alpn" in query:
+                        proxy["alpn"] = query["alpn"][0].split(",")
+
+                    proxies.append(proxy)
+                except Exception as e:
+                    raise ValueError(f"Hysteria2 parse error: {e}") from e
+
+        if not proxies:
+            raise ValueError("convert v2ray subscribe error: format invalid")
+
+        return proxies

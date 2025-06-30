@@ -3,11 +3,12 @@
     "name": "站点数据统计",
     "description": "站点统计数据图表。",
     "labels": "站点,仪表板",
-    "version": "1.8",
+    "version": "1.9",
     "icon": "statistic.png",
     "author": "lightolly,jxxghp",
     "level": 2,
     "history": {
+      "v1.9": "过滤未启用的站点数据",
       "v1.8": "修复站点数据增量处理逻辑",
       "v1.7.1": "优化内存占用",
       "v1.6": "优化了站点数据获取失败时的回退逻辑",
@@ -364,11 +365,12 @@
     "name": "豆瓣榜单订阅",
     "description": "监控豆瓣热门榜单，自动添加订阅。",
     "labels": "订阅",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "icon": "movie.jpg",
     "author": "jxxghp",
     "level": 2,
     "history": {
+      "v2.0.1": "优化douban_id匹配和类型匹配",
       "v2.0.0": "优化cron表达式输入"
     }
   },
@@ -412,7 +414,7 @@
   },
   "ToBypassTrackers": {
     "name": "绕过Trackers",
-    "description": "提供tracker服务器IP地址列表，帮助IPv6连接绕过OpenClash",
+    "description": "提供tracker服务器IP地址列表，帮助IPv6连接绕过OpenClash。",
     "labels": "工具",
     "version": "1.4.1",
     "icon": "Clash_A.png",
@@ -431,11 +433,12 @@
     "name": "IMDb源",
     "description": "让探索支持IMDb数据源。",
     "labels": "探索",
-    "version": "1.3.2",
+    "version": "1.3.3",
     "icon": "IMDb_IOS-OSX_App.png",
     "author": "wumode",
     "level": 1,
     "history": {
+      "v1.3.3": "修复依赖问题",
       "v1.3.2": "更新 API query hash",
       "v1.3.1": "修复按日期排序错误",
       "v1.3": "优化网络连接",
@@ -448,11 +451,18 @@
     "name": "Clash Rule Provider",
     "description": "随时为Clash添加一些额外的规则。",
     "labels": "工具",
-    "version": "1.0.0",
+    "version": "1.2.2",
     "icon": "Mihomo_Meta_A.png",
     "author": "wumode",
     "level": 1,
     "history": {
+      "v1.2.2": "展示更多信息; 修复交互问题",
+      "v1.2.1": "修复配置模板错误",
+      "v1.2.0": "支持管理多个订阅; 支持导入配置模板和 V2Ray 链接; 优化界面",
+      "v1.1.3": "添加仪表盘组件",
+      "v1.1.1": "支持解析 V2ray 订阅",
+      "v1.1.0": "支持规则集合; 添加ACL4SSR规则集; 配置说明",
+      "v1.0.1": "支持规则搜索, 优化细节",
       "v1.0.0": "支持: 规则分页; 导入规则; 代理组; 附加出站代理; 按区域分组",
       "v0.1.0": "新增ClashRuleProvider"
     }
