@@ -81,11 +81,12 @@ class OpenAi(object):
         :param text: 选项
         :param image: 图片
         """
-        text_prompt = f"请选择与图片对应的影视名称，注意：仅输出选择的答案。\n```{text}```"
+        sys_prompt = "我将为你提供一张影视图片及一个影视名称列表，请你根据图片内容仔细观察并准确判断，选出与图片内容完全匹配的影视名称。请只输出你选择的选项名称，避免多余描述。"
         result = ""
         try:
-            completion = self.__get_model(message=text_prompt,
+            completion = self.__get_model(message=text,
                                           img_url=image,
+                                          prompt=sys_prompt,
                                           temperature=0.2,
                                           top_p=0.9)
             result = completion.choices[0].message.content.strip()
