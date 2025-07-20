@@ -142,7 +142,63 @@ class Tjupt(_ISiteSigninHandler):
                                           regexs=self._succeed_regex)
         if sign_status:
             logger.info(f"{site} 签到成功")
+            self.__rank(site_cookie, ua, proxy, site)
             return True, '签到成功'
         else:
             logger.error(f"{site} 签到失败，请到页面查看")
             return False, '签到失败，请到页面查看'
+
+    def __rank(self, site_cookie, ua, proxy, site):
+        """
+        排名
+        """
+        # 当前时间
+        from datetime import datetime
+        timenow = datetime.now()
+        format_hour = timenow.strftime("%Y年%m月%d日%H时")
+        format_time = timenow.strftime("%Y-%m-%d %H:%M")[:-1]
+
+        try:
+            sign_in_rank = RequestUtils(
+                cookies=site_cookie, ua=ua,
+                proxies=settings.PROXY if proxy else None
+            ).get_res('https://tjupt.org/topten.php?type=7&subtype=today_attend&orderby=added&order=DESC&all=1')
+
+            if not sign_in_rank or sign_in_rank.status_code != 200:
+                logger.error(f"{site} 获取{format_hour}签到排名失败")
+                return False
+
+            from lxml import etree
+            html = etree.HTML(sign_in_rank.text)
+            if len(html) <= 0:
+                logger.error(f"{site} 获取{format_hour}签到排名失败")
+                return False
+
+            # 用户名
+            xpath_user = html.xpath('//table[@id="info_block"]//td//span[1]/text()')
+            username = xpath_user[0] if xpath_user else ''
+
+            # 签到列表
+            rank_list = []
+            tr_elements = html.xpath('//td[@class="embedded"]//tr')
+            for tr in tr_elements:
+                second_td = tr.xpath('./td[2]')
+                third_td = tr.xpath('./td[3]')
+                if not second_td or not third_td:
+                    continue
+                second_td_text = second_td[0].text or ''.join(second_td[0].itertext()).strip()
+                third_td_text = third_td[0].text or ''.join(third_td[0].itertext()).strip()
+                if third_td_text.startswith(format_time):
+                    rank_list.append({"user_name": second_td_text, "sign_time": third_td_text})
+
+            rank_list.sort(key=lambda x: x['sign_time'])
+
+            for i, item in enumerate(rank_list):
+                if item['user_name'] == username:
+                    logger.info(f"{site} {format_hour}签到排名为：{i + 1}")
+                    return True
+        except Exception as e:
+            logger.error(f"{site} 获取{format_hour}签到排名失败，信息：{str(e)}")
+
+        logger.error(f"{site} 获取{format_hour}签到排名失败")
+        return False
