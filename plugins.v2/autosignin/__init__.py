@@ -1479,13 +1479,11 @@ class AutoSignIn(_PluginBase):
                     "action": "cloudflare_speedtest"
                 })
 
-            # 发送通知
-            if self._notify:
-                # 签到详细信息 登录成功、签到成功、已签到、仿真签到成功、失败--命中重试
-                signin_message = login_success_msg + sign_success_msg + already_sign_msg + fz_sign_msg + failed_msg
-                if len(retry_msg) > 0:
-                    signin_message += retry_msg
+            # 签到详细信息 仅失败--命中重试
+            signin_message = failed_msg + retry_msg
 
+            # 发送通知
+            if self._notify and len(signin_message) > 0:
                 signin_message = "\n".join([f'【{s[0]}】{s[1]}' for s in signin_message if s])
                 self.post_message(title=f"【站点自动{type_str}】",
                                   mtype=NotificationType.SiteMessage,
@@ -1494,6 +1492,9 @@ class AutoSignIn(_PluginBase):
                                        f"下次{type_str}数量: {len(retry_sites) if self._retry_keyword else 0} \n"
                                        f"{signin_message}"
                                   )
+            elif self._notify:
+                logger.info("全部{type_str}成功，无需发送通知消息")
+
             if event:
                 self.post_message(channel=event.event_data.get("channel"),
                                   title=f"站点{type_str}完成！", userid=event.event_data.get("user"))
