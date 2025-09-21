@@ -555,5 +555,19 @@
       "v1.2": "优化上报信息量",
       "v1.1": "加强脱敏处理"
     }
+  },
+  "MedalWallNew": {
+    "name": "勋章墙-新版",
+    "description": "站点勋章购买提醒、统计、展示。\\n基于 KoWming 的勋章墙改造而来，详情可参考 https://github.com/KoWming",
+    "labels": "站点",
+    "version": "1.0",
+    "icon": "https://raw.githubusercontent.com/liheji/MoviePilot-Plugins/main/icons/Medal.png",
+    "author": "liheji",
+    "level": 2,
+    "v2": true,
+    "release": true,
+    "history": {
+        "v1.0": "初始版本。"
+    }
   }
 }
