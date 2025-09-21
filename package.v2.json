@@ -42,11 +42,13 @@
     "name": "站点自动签到",
     "description": "自动模拟登录、签到站点。",
     "labels": "站点",
-    "version": "2.6",
+    "version": "2.7",
     "icon": "signin.png",
     "author": "thsrite",
     "level": 2,
+    "release": true,
     "history": {
+      "v2.7": "站点请求使用站点设置的超时时间",
       "v2.6": "感谢madrays佬提供的UI!",
       "v2.5.4": "增加保号风险提示",
       "v2.5.3": "优化执行周期输入，需要MoviePilot v2.2.1+",
@@ -181,11 +183,13 @@
     "name": "演职人员刮削",
     "description": "刮削演职人员图片以及中文名称。",
     "labels": "媒体库,刮削",
-    "version": "2.2",
+    "version": "2.2.2",
     "icon": "actor.png",
     "author": "jxxghp",
     "level": 1,
     "history": {
+      "v2.2.2": "修复异常日志问题",
+      "v2.2.1": "优化错误数据兼容处理",
       "v2.2": "修改使用自定义图片域名时无法下载图片的问题",
       "v2.1": "优化执行周期输入，需要MoviePilot v2.2.1+",
       "v2.0": "兼容MoviePilot V2 版本",
@@ -349,6 +353,18 @@
       "v2.0": "适配新的目录结构变化，短剧分类名称调整为配置目录路径，升级后需要重新调整设置后才能使用。"
     }
   },
+  "MultiClass": {
+    "name": "视频多级分类",
+    "description": "支持视频多级分类",
+    "labels": "文件整理",
+    "version": "0.1",
+    "icon": "Calibreweb_B.png",
+    "author": "liuhangbin",
+    "level": 1,
+    "history": {
+      "v0.1": "视频多级分类插件, 目前仅支持电影按评分，年代，系列分类。"
+    }
+  },
   "MoviePilotUpdateNotify": {
     "name": "MoviePilot更新推送",
     "description": "MoviePilot推送release更新通知、自动重启。",
@@ -418,28 +434,40 @@
     "name": "绕过Trackers",
     "description": "提供tracker服务器IP地址列表，帮助IPv6连接绕过OpenClash。",
     "labels": "工具",
-    "version": "1.4.1",
+    "version": "1.4.3",
     "icon": "Clash_A.png",
     "author": "wumode",
     "level": 2,
     "history": {
-      "v1.0": "支持自定义Trackers",
-      "v1.1": "更新列表后发送通知",
-      "v1.2": "修复Trackers加载错误",
-      "v1.3": "新增一些Trackers",
+      "v1.4.3": "修复 bug",
+      "v1.4.2": "修复插件动作",
+      "v1.4.1": "修复通知类型错误",
       "v1.4": "异步查询DNS",
-      "v1.4.1": "修复通知类型错误"
+      "v1.3": "新增一些Trackers",
+      "v1.2": "修复Trackers加载错误",
+      "v1.1": "更新列表后发送通知",
+      "v1.0": "支持自定义Trackers"
     }
   },
   "ImdbSource": {
     "name": "IMDb源",
-    "description": "让探索和推荐支持IMDb数据源。",
+    "description": "让探索，推荐和媒体识别支持IMDb数据源。",
     "labels": "探索",
-    "version": "1.4.3",
+    "version": "1.5.8",
     "icon": "IMDb_IOS-OSX_App.png",
     "author": "wumode",
     "level": 1,
     "history": {
+      "v1.5.8": "修改UA",
+      "v1.5.7": "改进异常处理",
+      "v1.5.6": "固定仪表盘组件海报比例; 修复 bug",
+      "v1.5.5": "修复初始化错误",
+      "v1.5.4": "改进媒体识别",
+      "v1.5.3": "异步执行; 修复 bugs (主程序版本需要高于 2.6.8)",
+      "v1.5.2": "修复一些bugs",
+      "v1.5.1": "改进媒体id转换; 支持二级分类和自定义推荐",
+      "v1.5.0": "支持媒体识别",
+      "v1.4.4": "更新数据源",
       "v1.4.3": "为仪表盘组件添加缓存",
       "v1.4.2": "优化小屏幕组件显示",
       "v1.4.1": "优化亮色主题显示",
@@ -457,11 +485,19 @@
     "name": "Clash Rule Provider",
     "description": "随时为Clash添加一些额外的规则。",
     "labels": "工具",
-    "version": "1.2.7",
+    "version": "1.4.2",
     "icon": "Mihomo_Meta_A.png",
     "author": "wumode",
     "level": 1,
+    "release": true,
     "history": {
+      "v1.4.2": "优化移动端 UI; 支持显示节点链接",
+      "v1.4.1": "修复配置模板保存错误, 请重新配置Clash模板",
+      "v1.4.0": "优化 UI; 支持连接多个 Clash Dashboards", 
+      "v1.3.3": "通过emoji识别国家; 按国家分组节点; mrs格式支持",
+      "v1.3.2": "注册插件动作",
+      "v1.3.1": "支持配置 Hosts",
+      "v1.2.8": "改进导入界面",
       "v1.2.7": "修复分享链接解析错误",
       "v1.2.6": "修复代理组修改丢失问题",
       "v1.2.4": "支持geo规则补全; 代理组编辑",
@@ -481,13 +517,43 @@
     "name": "美剧生词标注",
     "description": "根据CEFR等级，为英语影视剧标注高级词汇。",
     "labels": "英语",
-    "version": "1.0.1",
+    "version": "1.1.2",
     "icon": "LexiAnnot.png",
     "author": "wumode",
     "level": 1,
     "history": {
+      "v1.1.2": "使用子进程避免 spaCy 模型常驻内存",
+      "v1.1.1": "添加任务页面; 改进 spaCy 模型加载逻辑",
+      "v1.1.0": "支持考试词汇标注; 优化分词处理; 修复错误",
       "v1.0.1": "合并连字符词; 避免ARM平台依赖问题",
       "v1.0": "新增LexiAnnot"
+    }
+  },
+  "MeoWMsg": {
+    "name": "MeoW消息通知",
+    "description": "支持使用MeoW发送消息通知。",
+    "labels": "消息通知",
+    "version": "1.0.1",
+    "icon": "MeoW_A.png",
+    "author": "Licardo",
+    "level": 2,
+    "history": {
+      "v1.0.0": "首个版本，新增MeoW消息通知",
+      "v1.0.1": "优化代码，修复运行一次按钮没办法自动关闭的问题"
+    }
+  },
+  "BugReporter": {
+    "name": "Bug反馈",
+    "description": "自动上报异常，协助开发者发现和解决问题。",
+    "labels": "开发",
+    "version": "1.3",
+    "icon": "Alist_encrypt_A.png",
+    "author": "jxxghp",
+    "level": 1,
+    "history": {
+      "v1.3": "减少网络异常信息上送",
+      "v1.2": "优化上报信息量",
+      "v1.1": "加强脱敏处理"
     }
   }
 }

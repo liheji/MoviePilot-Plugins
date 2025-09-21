@@ -217,12 +217,13 @@
     "name": "Cloudflare IP优选",
     "description": "🌩 测试 Cloudflare CDN 延迟和速度，自动优选IP。",
     "labels": "网络,站点",
-    "version": "1.4",
+    "version": "1.5",
     "icon": "cloudflare.jpg",
     "author": "thsrite",
     "level": 1,
     "v2": true,
     "history": {
+      "v1.5": "适配CloudflareSpeedTest新版名称",
       "v1.4": "修复立即运行一次",
       "v1.3": "调整插件开启状态判断条件",
       "v1.2": "增强API安全性"
@@ -477,11 +478,12 @@
     "name": "演职人员刮削",
     "description": "刮削演职人员图片以及中文名称。",
     "labels": "媒体库,刮削",
-    "version": "1.4",
+    "version": "1.4.1",
     "icon": "actor.png",
     "author": "jxxghp",
     "level": 1,
     "history": {
+      "v1.4.1": "修复异常报错问题",
       "v1.4": "人物图片调整为优先从TMDB获取，避免douban图片CDN加载过慢的问题",
       "v1.3": "修复v1.8.5版本后刮削报错问题"
     }
@@ -560,12 +562,13 @@
     "name": "TMDB剧集组刮削",
     "description": "从TMDB剧集组刮削季集的实际顺序。",
     "labels": "刮削",
-    "version": "2.6",
+    "version": "2.6.1",
     "icon": "Element_A.png",
     "author": "叮叮当",
     "level": 1,
     "v2": true,
     "history": {
+      "v2.6.1": "修复异常报错日志",
       "v2.6": "修复无法获取媒体库中季0的问题",
       "v2.5": "修复当媒体服务器中剧集的季不完整时会中断的问题",
       "v2.3": "修复v2版本无法读取媒体库的问题",
@@ -943,22 +946,26 @@
     "name": "钉钉机器人",
     "description": "支持使用钉钉机器人发送消息通知。",
     "labels": "消息通知,钉钉机器人",
-    "version": "1.12",
+    "version": "1.13",
     "icon": "Dingding_A.png",
     "author": "nnlegenda",
     "level": 1,
-    "v2": true
+    "v2": true,
+    "history": {
+      "v1.13": "优化钉钉消息换行"
+    }
   },
   "DynamicWeChat": {
     "name": "动态企微可信IP",
     "description": "修改企微应用可信IP，支持Srever酱等第三方通知。验证码以？结尾发送到企业微信应用",
     "labels": "消息通知",
-    "version": "1.7.2",
+    "version": "1.7.3",
     "icon": "Wecom_A.png",
     "author": "RamenRa",
     "level": 2,
     "v2": true,
     "history": {
+      "v1.7.3": "修复检测登录的元素",
       "v1.7.2": "||wan参数细分,修复使用||wan时立即检测一次实际不生效,修复v1第三方备用通知可能无效,调整验证码获取",
       "v1.7.1": "允许使用'||wan2'选项及无法使用'立即检测一次'",
       "v1.7.0": "使用第三方通知时可IP变动后通知，拟支持多网络出口检查。",

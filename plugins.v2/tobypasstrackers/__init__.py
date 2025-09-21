@@ -12,7 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import Response
 
 from app.core.config import settings
-from app.core.event import eventmanager
+from app.core.event import eventmanager, Event
 from app.db.site_oper import SiteOper
 from app.log import logger
 from app.plugins import _PluginBase
@@ -29,7 +29,7 @@ class ToBypassTrackers(_PluginBase):
     # 插件图标
     plugin_icon = "Clash_A.png"
     # 插件版本
-    plugin_version = "1.4.1"
+    plugin_version = "1.4.3"
     # 插件作者
     plugin_author = "wumode"
     # 作者主页
@@ -68,7 +68,8 @@ class ToBypassTrackers(_PluginBase):
         self.ipv6_txt = self.get_data("ipv6_txt") if self.get_data("ipv6_txt") else ""
         self.ipv4_txt = self.get_data("ipv4_txt") if self.get_data("ipv4_txt") else ""
         try:
-            with open(f"{settings.ROOT_PATH}/app/plugins/tobypasstrackers/sites/trackers", "r", encoding="utf-8") as f:
+            site_file = settings.ROOT_PATH/'app'/'plugins'/'tobypasstrackers'/'sites'/'trackers'
+            with open(site_file, "r", encoding="utf-8") as f:
                 base64_str = f.read()
                 self.trackers = json.loads(base64.b64decode(base64_str).decode("utf-8"))
         except Exception as e:
@@ -101,7 +102,6 @@ class ToBypassTrackers(_PluginBase):
                                         )
                 self._onlyonce = False
             self.__update_config()
-            # self._scheduler.print_jobs()
             self._scheduler.start()
 
     def get_state(self) -> bool:
@@ -128,7 +128,14 @@ class ToBypassTrackers(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        pass
+        return [{
+            "cmd": "/refresh_tracker_ips",
+            "event": EventType.PluginAction,
+            "desc": "更新 Tracker IP 列表",
+            "data": {
+                "action": "refresh_tracker_ips"
+            }
+        }]
 
     def get_api(self) -> List[Dict[str, Any]]:
         """
@@ -495,7 +502,7 @@ class ToBypassTrackers(_PluginBase):
                     self._scheduler.shutdown()
                 self._scheduler = None
         except Exception as e:
-            logger.error("退出插件失败：%s" % str(e))
+            logger.error(f"退出插件失败：{e}")
 
     def get_service(self) -> List[Dict[str, Any]]:
         """
@@ -518,13 +525,13 @@ class ToBypassTrackers(_PluginBase):
             }]
         return []
 
-    def bypassed_ips(self, protocol: str):
+    def bypassed_ips(self, protocol: str) -> Response:
         if protocol == '6':
             return Response(content=self.ipv6_txt, media_type="text/plain")
         return Response(content=self.ipv4_txt, media_type="text/plain")
 
     @eventmanager.register(EventType.PluginAction)
-    def update_ips(self):
+    def update_ips(self, event: Optional[Event]=None):
         def __is_ip_in_subnet(ip_input: str, su_bnet: str) -> bool:
             """
             Check if the given IP address is in the specified subnet.
@@ -537,10 +544,10 @@ class ToBypassTrackers(_PluginBase):
             subnet_obj = ipaddress.ip_network(su_bnet, strict=False)
             return ip_obj in subnet_obj
 
-        def __search_ip(ip, ips_list):
+        def __search_ip(_ip, ips_list):
             i = 0
             for ip_range in ips_list:
-                if __is_ip_in_subnet(ip, ip_range):
+                if __is_ip_in_subnet(_ip, ip_range):
                     return i
                 i += 1
             return -1
@@ -592,6 +599,10 @@ class ToBypassTrackers(_PluginBase):
                           for domain_ in domains_])
             await asyncio.gather(*tasks)
 
+        if event:
+            event_data = event.event_data
+            if not event_data or event_data.get("action") != "refresh_tracker_ips":
+                return
         query_helper = DnsHelper(self._dns_input)
         logger.info(f"开始通过 {query_helper.method_name} 解析DNS")
         chnroute6_lists_url = "https://ispip.clang.cn/all_cn_ipv6.txt"
@@ -608,16 +619,14 @@ class ToBypassTrackers(_PluginBase):
             # Load Chnroute6 Lists
             res = RequestUtils().get_res(url=chnroute6_lists_url)
             if res is not None and res.status_code == 200:
-                chnroute6_lists = res.text[:-1].split('\n')
-                for ipr in chnroute6_lists:
-                    ipv6_list.append(ipr)
+                chnroute6_lists = res.text.strip().split('\n')
+                ipv6_list = [*chnroute6_lists]
         if self._china_ip_route:
             # Load Chnroute Lists
             res = RequestUtils().get_res(url=chnroute_lists_url)
             if res is not None and res.status_code == 200:
-                chnroute_lists = res.text[:-1].split('\n')
-                for ipr in chnroute_lists:
-                    ip_list.append(ipr)
+                chnroute_lists = res.text.strip().split('\n')
+                ip_list = [*chnroute_lists]
         do_sites = {site.domain: site.name for site in SiteOper().list_order_by_pri() if
                     site.id in self._bypassed_sites}
         domain_name_map = {}
