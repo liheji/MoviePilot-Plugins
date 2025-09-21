@@ -564,7 +564,6 @@
     "icon": "https://raw.githubusercontent.com/liheji/MoviePilot-Plugins/main/icons/Medal.png",
     "author": "liheji",
     "level": 2,
-    "v2": true,
     "release": true,
     "history": {
         "v1.0": "初始版本。"
