@@ -331,17 +331,17 @@ class MedalUIComponents:
             })
         
         if medal.get('bonus_rate'):
-            bonus_color = '#666'
+            bonus_style = 'color:#666;'
             try:
                 if float(medal.get('bonus_rate', '').replace('%', '')) < 0:
-                    bonus_color = 'rgb(255, 92, 92)'
+                    bonus_style = 'font-weight:bold;color:rgb(255, 92, 92);'
             except Exception:
                 pass
             attrs.append({
                 'component': 'VCol',
                 'props': {'cols': 12, 'class': 'py-0'},
                 'content': [
-                    {'component': 'div', 'props': {'class': 'text-caption', 'style': f'color:{bonus_color};'}, 'text': f"魔力加成：{medal.get('bonus_rate','')}"}
+                    {'component': 'div', 'props': {'class': 'text-caption', 'style': f'{bonus_style}'}, 'text': f"魔力加成：{medal.get('bonus_rate','')}"}
                 ]
             })
         
