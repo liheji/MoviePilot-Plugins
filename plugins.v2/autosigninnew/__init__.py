@@ -327,7 +327,7 @@ class AutoSignInNew(_PluginBase):
                                         'component': 'VSwitch',
                                         'props': {
                                             'model': 'notify',
-                                            'label': '发送通知',
+                                            'label': '失败发送通知',
                                         }
                                     }
                                 ]
