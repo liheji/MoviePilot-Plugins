@@ -1492,7 +1492,7 @@ class AutoSignInNew(_PluginBase):
                                        f"{signin_message}"
                                   )
             elif self._notify:
-                logger.info("全部{type_str}成功，无需发送通知消息")
+                logger.info("f全部{type_str}成功，无需发送通知消息")
 
             if event:
                 self.post_message(channel=event.event_data.get("channel"),
