@@ -63,7 +63,7 @@ class MedalWallNew(_PluginBase):
         """初始化插件"""
         # 停止现有任务
         self.stop_service()
-        
+
         # 初始化助手
         self.sites = SitesHelper()
         self.siteoper = SiteOper()
@@ -83,7 +83,7 @@ class MedalWallNew(_PluginBase):
             # 过滤掉已删除的站点
             all_sites = [site.id for site in self.siteoper.list_order_by_pri()] + [site.get("id") for site in self.__custom_sites()]
             self._chat_sites = [site_id for site_id in all_sites if site_id in self._chat_sites]
-            
+
             # 保存配置
             self.__update_config()
 
@@ -154,17 +154,25 @@ class MedalWallNew(_PluginBase):
             # 存储需要推送的勋章
             notify_medals = []
 
+            # 获取最新数据
+            latest_data = self.siteoper.get_userdata_latest()
+            site_map = {data.domain: data for data in latest_data}
+
             # 遍历所有选中的站点
             for site_id in self._chat_sites:
                 try:
-                    # 获取站点勋章数据
-                    medals = self.get_medal_data(site_id)
-                    if not medals:
-                        continue
-
                     # 获取站点信息
                     site = self.siteoper.get(site_id)
                     if not site:
+                        continue
+
+                    # 站点数据
+                    import sys
+                    data = site_map.get(site.domain)
+
+                    # 获取站点勋章数据
+                    medals = self.get_medal_data(site_id, float(data.bonus or sys.maxsize))
+                    if not medals:
                         continue
 
                     # 筛选可购买的勋章
@@ -192,7 +200,7 @@ class MedalWallNew(_PluginBase):
         except Exception as e:
             logger.error(f"处理所有站点时发生错误: {str(e)}")
 
-    def get_medal_data(self, site_id: str) -> List[Dict]:
+    def get_medal_data(self, site_id: str, site_bonus: float) -> List[Dict]:
         """统一入口：获取站点勋章数据"""
         try:
             # 获取站点信息
@@ -209,6 +217,11 @@ class MedalWallNew(_PluginBase):
 
             # 获取勋章数据
             medals = handler().fetch_medals(site)
+
+            for medal in medals:
+                if (medal.get('purchase_status') or '').strip() in ['购买', '赠送'] \
+                        and site_bonus < float(str(medal.get('price', 0)).replace(",", "")):
+                    medal['purchase_status'] = '魔力值不足'
 
             # 保存数据到缓存
             self.save_data(f'medals_{site_id}', medals, 'zmmedal')
@@ -229,7 +242,7 @@ class MedalWallNew(_PluginBase):
                     return site_schema
             except Exception as e:
                 logger.error("站点模块加载失败：%s" % str(e))
-        
+
         # 如果没有匹配到特定处理器，使用兜底的 PHP 处理器
         logger.info(f"未找到特定处理器，使用兜底 PHP 处理器处理站点: {url}")
         from .sites.base import PhpMedalHandler
@@ -399,18 +412,18 @@ class MedalWallNew(_PluginBase):
         """获取勋章页面数据"""
         try:
             from .ui_components import MedalUIComponents
-            
+
             # 1. 汇总全局统计数据
             site_ids = self._chat_sites
             all_medals = []
             site_medal_map = {}
             site_name_map = {}
-            
+
             for site_id in site_ids:
                 medals = self.get_data(f'medals_{site_id}', 'zmmedal') or []
                 unhas_medals = self.get_data(f'unhas_medals_{site_id}', 'zmmedal') or []
                 has_medals = self.get_data(f'has_medals_{site_id}', 'zmmedal') or []
-                
+
                 # 合并去重
                 site_medals = []
                 processed = set()
@@ -422,7 +435,7 @@ class MedalWallNew(_PluginBase):
                             site_medals.append(medal)
                             all_medals.append(medal)
                 site_medal_map[site_id] = site_medals
-                
+
                 # 获取站点名
                 site = self.siteoper.get(site_id)
                 site_name_map[site_id] = site.name if site else f"站点{site_id}"
@@ -432,12 +445,13 @@ class MedalWallNew(_PluginBase):
             medal_total = len(all_medals)
             buy_count = sum(1 for m in all_medals if (m.get('purchase_status') or '').strip() in ['购买', '赠送'])
             owned_count = sum(1 for m in all_medals if (m.get('purchase_status') or '').strip() in ['已经购买', '已拥有'])
+            not_afford_count = sum(1 for m in all_medals if (m.get('purchase_status') or '').strip() in ['魔力值不足'])
             not_buy_count = sum(1 for m in all_medals if (m.get('purchase_status') or '').strip() in ['已过可购买时间', '未到可购买时间', '需要更多工分', '需要更多魔力值', '需要更多蝌蚪', '库存不足', '仅授予'])
             unknown_count = sum(1 for m in all_medals if not (m.get('purchase_status') or '').strip())
 
             # 2. 顶部统计信息
             top_row = MedalUIComponents.create_top_stats(
-                site_count, medal_total, buy_count, owned_count, not_buy_count, unknown_count
+                site_count, medal_total, buy_count, owned_count, not_afford_count, not_buy_count, unknown_count
             )
 
             # 3. 站点分组
@@ -450,7 +464,7 @@ class MedalWallNew(_PluginBase):
 
             # 4. 页面结构
             return [top_row] + site_rows
-            
+
         except Exception as e:
             logger.error(f"生成勋章页面时发生错误: {str(e)}")
             return [{
@@ -471,14 +485,14 @@ class MedalWallNew(_PluginBase):
         # 动态判断MoviePilot版本，决定定时任务输入框组件类型
         version = getattr(settings, "VERSION_FLAG", "v1")
         cron_field_component = "VCronField" if version == "v2" else "VTextField"
-        
+
         # 需要过滤没有勋章的站点名称列表
         filtered_sites = ['星空', '高清杜比', '聆音', '朱雀', '馒头', '家园', '朋友', '我堡', '彩虹岛', '天空', '听听歌']
         # 获取站点列表并过滤
         all_sites = [site for site in self.sites.get_indexers() if not site.get("public") and site.get("name") not in filtered_sites] + self.__custom_sites()
         # 构建站点选项
         site_options = [{"title": site.get("name"), "value": site.get("id")} for site in all_sites]
-        
+
         return [
             {
                 'component': 'VForm',

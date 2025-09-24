@@ -12,13 +12,14 @@ class MedalUIComponents:
     
     @staticmethod
     def create_top_stats(site_count: int, medal_total: int, buy_count: int, 
-                        owned_count: int, not_buy_count: int, unknown_count: int) -> Dict:
+                        owned_count: int, not_afford_count: int, not_buy_count: int, unknown_count: int) -> Dict:
         """创建顶部统计信息"""
         top_stats = [
             {'icon': 'mdi-office-building', 'color': '#16b1ff', 'value': site_count, 'label': '站点数量'},
             {'icon': 'mdi-medal', 'color': '#16b1ff', 'value': medal_total, 'label': '勋章总数'},
             {'icon': 'mdi-cart-check', 'color': '#a259e6', 'value': buy_count, 'label': '可购买'},
             {'icon': 'mdi-badge-account', 'color': '#ff357a', 'value': owned_count, 'label': '已拥有'},
+            {'icon': 'mdi-money-off', 'color': '#ffb300', 'value': not_afford_count, 'label': '魔力值不足'},
             {'icon': 'mdi-cancel', 'color': '#ffb300', 'value': not_buy_count, 'label': '不可购买'},
             {'icon': 'mdi-help-circle-outline', 'color': '#ff5c5c', 'value': unknown_count, 'label': '未知状态'},
         ]
@@ -38,7 +39,7 @@ class MedalUIComponents:
                     'content': [
                         {
                             'component': 'VCol',
-                            'props': {'cols': 2, 'class': 'text-center px-1'},
+                            'props': {'cols': 1.5, 'class': 'text-center px-1'},
                             'content': [
                                 {'component': 'VIcon', 'props': {'size': '40', 'color': v['color'], 'class': 'mb-1'}, 'text': v['icon']},
                                 {'component': 'div', 'props': {'class': 'font-weight-bold', 'style': 'font-size: 2rem; color: #222;'}, 'text': str(v['value'])},
@@ -56,8 +57,9 @@ class MedalUIComponents:
         total = len(medals)
         owned = sum(1 for m in medals if (m.get('purchase_status') or '').strip() in ['已经购买', '已拥有'])
         buy = sum(1 for m in medals if (m.get('purchase_status') or '').strip() in ['购买', '赠送'])
+        not_afford = sum(1 for m in medals if (m.get('purchase_status') or '').strip() in ['魔力值不足'])
         not_buy = sum(1 for m in medals if (m.get('purchase_status') or '').strip() in ['已过可购买时间', '未到可购买时间', '需要更多工分', '需要更多魔力值', '需要更多蝌蚪', '库存不足', '仅授予'])
-        
+
         # 站点行
         site_row = {
             'component': 'VRow',
@@ -87,6 +89,10 @@ class MedalUIComponents:
                     {'component': 'VChip', 'props': {'color': '#e6f7ea', 'variant': 'flat', 'size': 'large', 'class': 'mr-14', 'style': 'font-size:0.92rem; font-weight:500; border-radius:18px; padding:6px 18px; min-height:36px;'}, 'content': [
                         {'component': 'VIcon', 'props': {'size': '20', 'color': '#43c04b', 'class': 'mr-1'}, 'text': 'mdi-cart-check'},
                         {'component': 'span', 'props': {}, 'text': f'可购买: {buy}'}
+                    ]},
+                    {'component': 'VChip', 'props': {'color': '#ffedc1', 'variant': 'flat', 'size': 'large', 'class': 'mr-14', 'style': 'font-size:0.92rem; font-weight:500; border-radius:18px; padding:6px 18px; min-height:36px;'}, 'content': [
+                        {'component': 'VIcon', 'props': {'size': '20', 'color': '#ff5c5c', 'class': 'mr-1'}, 'text': 'mdi-money-off'},
+                        {'component': 'span', 'props': {}, 'text': f'魔力值不足: {not_afford}'}
                     ]},
                     {'component': 'VChip', 'props': {'color': '#ffeaea', 'variant': 'flat', 'size': 'large', 'class': '', 'style': 'font-size:0.92rem; font-weight:500; border-radius:18px; padding:6px 18px; min-height:36px;'}, 'content': [
                         {'component': 'VIcon', 'props': {'size': '20', 'color': '#ff5c5c', 'class': 'mr-1'}, 'text': 'mdi-cancel'},
@@ -131,19 +137,24 @@ class MedalUIComponents:
         # 分类分组
         buyable_medals = [m for m in medals if (m.get('purchase_status') or '').strip() in ['购买', '赠送']]
         owned_medals = [m for m in medals if (m.get('purchase_status') or '').strip() in ['已经购买', '已拥有']]
+        not_afford_medals = [m for m in medals if (m.get('purchase_status') or '').strip() in ['魔力值不足']]
         unavailable_medals = [m for m in medals if (m.get('purchase_status') or '').strip() in ['已过可购买时间', '未到可购买时间', '需要更多工分', '需要更多魔力值', '需要更多蝌蚪', '库存不足', '仅授予']]
         unknown_medals = [m for m in medals if not (m.get('purchase_status') or '').strip()]
-        
+
         detail_content = []
-        
+
         if buyable_medals:
             detail_content.append({'component': 'VCardTitle', 'props': {'class': 'mb-1', 'style': 'color:#43c04b; font-size:1rem; font-weight:600; text-align:left;'}, 'text': f'可购买（{len(buyable_medals)}）'})
             detail_content.append({'component': 'VRow', 'content': MedalUIComponents._get_medal_elements(buyable_medals)})
-            
+
         if owned_medals:
             detail_content.append({'component': 'VCardTitle', 'props': {'class': 'mb-1', 'style': 'color:#43c04b; font-size:1rem; font-weight:600; text-align:left;'}, 'text': f'已拥有（{len(owned_medals)}）'})
             detail_content.append({'component': 'VRow', 'content': MedalUIComponents._get_medal_elements(owned_medals)})
-            
+
+        if not_afford_medals:
+            detail_content.append({'component': 'VCardTitle', 'props': {'class': 'mb-1', 'style': 'color:#ffb300; font-size:1rem; font-weight:600; text-align:left;'}, 'text': f'魔力值不足（{len(not_afford_medals)}）'})
+            detail_content.append({'component': 'VRow', 'content': MedalUIComponents._get_medal_elements(not_afford_medals)})
+
         if unavailable_medals:
             # 排序不可购买勋章
             def get_unavailable_priority(medal):
@@ -187,8 +198,10 @@ class MedalUIComponents:
             elif chip_text in ['已经购买', '已拥有']:
                 chip_color = '#43c04b'
                 chip_text = '已拥有'
-            elif chip_text in ['已过可购买时间', '未到可购买时间', '需要更多工分', '需要更多魔力值', '需要更多蝌蚪', '仅授予', '库存不足']:
+            elif chip_text in ['魔力值不足']:
                 chip_color = '#ffb300'
+            elif chip_text in ['已过可购买时间', '未到可购买时间', '需要更多工分', '需要更多魔力值', '需要更多蝌蚪', '仅授予', '库存不足']:
+                chip_color = '#ff5c5c'
             else:
                 chip_color = '#b0b0b0'
                 chip_text = chip_text or '未知'
