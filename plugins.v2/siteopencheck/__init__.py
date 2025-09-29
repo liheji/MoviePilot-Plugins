@@ -28,7 +28,7 @@ class SiteOpenCheck(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "1.7"
+    plugin_version = "1.8"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -129,7 +129,8 @@ class SiteOpenCheck(_PluginBase):
         logger.info("开始检查所有站点的开注状态")
         try:
             # 获取所有站点
-            all_sites = self.sites.get_indexers()
+            all_sites = self.sites.get_indexsites()
+            logger.info(f"获取到 {len(all_sites)} 个站点")
             if not all_sites:
                 logger.error("未获取到站点信息")
                 return
@@ -147,13 +148,19 @@ class SiteOpenCheck(_PluginBase):
                     site_name = site_info.get("name", domain)
                     site_url = site_info.get("url", f"https://{domain}")
 
+                    # 构建注册页面URL
+                    signup_url = f"{site_url.rstrip('/')}/signup.php"
+
+                    logger.error(f"检查站点 {signup_url} 开注状态")
+                    
                     # 检查站点开注状态
-                    status, message = self.__check_site_registration(site_url, site_name)
+                    status, message = self.__check_site_registration(signup_url, site_name)
 
                     result = {
                         "domain": domain,
                         "name": site_name,
                         "url": site_url,
+                        "signup_url": signup_url,  # 添加注册页面URL
                         "status": status,
                         "message": message,
                         "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -194,68 +201,127 @@ class SiteOpenCheck(_PluginBase):
         except Exception as e:
             logger.error(f"检查所有站点时发生错误: {str(e)}")
 
-    def __check_site_registration(self, site_url: str, site_name: str) -> Tuple[str, str]:
+    def __check_site_registration(self, signup_url: str, site_name: str) -> Tuple[str, str]:
         """检查单个站点的注册状态"""
         try:
-            # 构建注册页面URL
-            signup_url = f"{site_url.rstrip('/')}/signup.php"
+            try:
+                if self._use_playwright:
+                    page_source = PlaywrightHelper().get_page_source(
+                        url=signup_url,
+                        cookies=None,  # 不携带cookie
+                        ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                        proxies=None,  # 不使用代理
+                        timeout=self._timeout
+                    )
+                else:
+                    res = RequestUtils(
+                        ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                        proxies=None,  # 不使用代理
+                        timeout=self._timeout
+                    ).get_res(url=signup_url)
 
-            # 获取页面内容
-            if self._use_playwright:
-                page_source = PlaywrightHelper().get_page_source(
-                    url=signup_url,
-                    cookies=None,  # 不携带cookie
-                    ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                    proxies=None,  # 不使用代理
-                    timeout=self._timeout
-                )
-            else:
-                res = RequestUtils(
-                    ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                    proxies=None,  # 不使用代理
-                    timeout=self._timeout
-                ).get_res(url=signup_url)
+                    if not res:
+                        error_msg = "无法访问注册页面，请求失败"
+                        logger.warning(f"站点 {site_name} ({signup_url}) 获取注册页面失败: {error_msg}")
+                        return "error", error_msg
+                    
+                    if res.status_code != 200:
+                        error_msg = f"无法访问注册页面，状态码: {res.status_code}"
+                        logger.warning(f"站点 {site_name} ({signup_url}) 获取注册页面失败: {error_msg}")
+                        return "error", error_msg
 
-                if not res or res.status_code != 200:
-                    return "error", f"无法访问注册页面，状态码: {res.status_code if res else 'None'}"
+                    page_source = res.text
 
-                page_source = res.text
+                if not page_source:
+                    error_msg = "无法获取页面内容"
+                    logger.warning(f"站点 {site_name} ({signup_url}) 获取注册页面失败: {error_msg}")
+                    return "error", error_msg
+                    
+            except Exception as e:
+                error_msg = f"获取页面内容时发生异常: {str(e)}"
+                logger.warning(f"站点 {site_name} ({signup_url}) 获取注册页面失败: {error_msg}")
+                return "error", error_msg
 
-            if not page_source:
-                return "error", "无法获取页面内容"
-
-            # 检查关闭注册的关键词
+            # 检查关闭注册的关键词（简体字和繁体字）
             closed_keywords = [
+                # 简体字
                 "自由注册当前关闭",
                 "对不起",
                 "抱歉",
                 "注册已关闭",
                 "暂不开放注册",
-                "注册功能暂时关闭"
+                "注册功能暂时关闭",
+                "注册暂时关闭",
+                "注册功能已关闭",
+                "暂时关闭注册",
+                "注册已暂停",
+                # 繁体字
+                "自由註冊當前關閉",
+                "對不起",
+                "抱歉",
+                "註冊已關閉",
+                "暫不開放註冊",
+                "註冊功能暫時關閉",
+                "註冊暫時關閉",
+                "註冊功能已關閉",
+                "暫時關閉註冊",
+                "註冊已暫停",
+                "註冊關閉",
+                "關閉註冊",
+                "註冊暫停",
+                "暫停註冊",
+                # 英文
+                "registration closed",
+                "registration disabled",
+                "registration temporarily closed",
+                "registration suspended",
+                "closed registration",
+                "disabled registration"
             ]
 
             for keyword in closed_keywords:
                 if keyword in page_source:
                     return "closed", f"检测到关闭注册关键词: {keyword}"
 
-            # 检查开放注册的关键词
+            # 检查开放注册的关键词（简体字、繁体字和英文）
             open_keywords = [
-                'type="submit"',
-                'button',
-                '注册'
+                # 简体字
+                "注册",
+                "立即注册",
+                "免费注册",
+                "新用户注册",
+                "用户注册",
+                # 繁体字
+                "註冊",
+                "立即註冊",
+                "免費註冊",
+                "新用戶註冊",
+                "用戶註冊",
+                # 英文
+                "register",
+                "registration",
+                "sign up",
+                "signup",
+                "create account"
             ]
 
             # 检查是否有提交按钮或包含注册的按钮
             if 'type="submit"' in page_source:
                 return "open", "检测到提交按钮，可能开放注册"
 
-            # 检查包含"注册"的按钮
-            if re.search(r'<button[^>]*>.*注册.*</button>', page_source, re.IGNORECASE):
-                return "open", "检测到注册按钮，可能开放注册"
+            # 检查包含注册关键词的按钮
+            for keyword in open_keywords:
+                if re.search(rf'<button[^>]*>.*{re.escape(keyword)}.*</button>', page_source, re.IGNORECASE):
+                    return "open", f"检测到注册按钮，可能开放注册: {keyword}"
 
-            # 检查包含"注册"的输入框
-            if re.search(r'<input[^>]*>.*注册.*</input>', page_source, re.IGNORECASE):
-                return "open", "检测到注册输入框，可能开放注册"
+            # 检查包含注册关键词的输入框
+            for keyword in open_keywords:
+                if re.search(rf'<input[^>]*>.*{re.escape(keyword)}.*</input>', page_source, re.IGNORECASE):
+                    return "open", f"检测到注册输入框，可能开放注册: {keyword}"
+
+            # 检查表单中的注册相关字段
+            if re.search(r'<form[^>]*>.*(?:注册|註冊|register|signup).*</form>', page_source, re.IGNORECASE | re.DOTALL):
+                return "open", "检测到注册表单，可能开放注册"
 
             # 如果没有明确的开放或关闭标识，返回未知
             return "unknown", "无法确定注册状态"

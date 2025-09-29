@@ -3,12 +3,13 @@
 站点开注检查UI组件生成器
 """
 from typing import List, Dict
+
 from app.log import logger
 
 
 class SiteCheckUIComponents:
     """站点开注检查UI组件生成器"""
-    
+
     @staticmethod
     def create_top_stats(total_sites: int, open_count: int, closed_count: int, error_count: int) -> Dict:
         """创建顶部统计信息"""
@@ -18,13 +19,13 @@ class SiteCheckUIComponents:
             {'icon': 'mdi-close-circle', 'color': '#f44336', 'value': closed_count, 'label': '关闭注册'},
             {'icon': 'mdi-alert-circle', 'color': '#ff9800', 'value': error_count, 'label': '异常站点'},
         ]
-        
+
         return {
             'component': 'VCard',
             'props': {
-                'variant': 'flat', 
-                'color': 'surface', 
-                'class': 'mb-4', 
+                'variant': 'flat',
+                'color': 'surface',
+                'class': 'mb-4',
                 'style': 'border-radius: 14px; box-shadow: 0 1px 4px rgba(22,177,255,0.04); padding: 12px 12px 6px 12px;'
             },
             'content': [
@@ -36,9 +37,14 @@ class SiteCheckUIComponents:
                             'component': 'VCol',
                             'props': {'cols': 3, 'class': 'text-center px-1'},
                             'content': [
-                                {'component': 'VIcon', 'props': {'size': '40', 'color': v['color'], 'class': 'mb-1'}, 'text': v['icon']},
-                                {'component': 'div', 'props': {'class': 'font-weight-bold', 'style': 'font-size: 2rem; color: #222;'}, 'text': str(v['value'])},
-                                {'component': 'div', 'props': {'class': 'text-body-2', 'style': 'color: #b0b0b0; font-size: 1rem; margin-top: 2px;'}, 'text': v['label']}
+                                {'component': 'VIcon', 'props': {'size': '40', 'color': v['color'], 'class': 'mb-1'},
+                                 'text': v['icon']},
+                                {'component': 'div',
+                                 'props': {'class': 'font-weight-bold', 'style': 'font-size: 2rem; color: #222;'},
+                                 'text': str(v['value'])},
+                                {'component': 'div', 'props': {'class': 'text-body-2',
+                                                               'style': 'color: #b0b0b0; font-size: 1rem; margin-top: 2px;'},
+                                 'text': v['label']}
                             ]
                         } for v in top_stats
                     ]
@@ -192,7 +198,7 @@ class SiteCheckUIComponents:
             status = site.get('status', 'unknown')
             status_color = SiteCheckUIComponents._get_status_color(status)
             status_icon = SiteCheckUIComponents._get_status_icon(status)
-            
+
             items.append({
                 'component': 'VCard',
                 'props': {
@@ -267,11 +273,11 @@ class SiteCheckUIComponents:
                                                     'color': 'primary',
                                                     'variant': 'outlined',
                                                     'size': 'small',
-                                                    'href': site.get('url', '#'),
+                                                    'href': site.get('signup_url', site.get('url', '#')),
                                                     'target': '_blank',
-                                                    'prepend-icon': 'mdi-open-in-new'
+                                                    'prepend-icon': 'mdi-account-plus'
                                                 },
-                                                'text': '访问站点'
+                                                'text': '访问注册页面'
                                             }
                                         ]
                                     }
@@ -305,7 +311,7 @@ class SiteCheckUIComponents:
                     }
                 ]
             })
-        
+
         return items
 
     @staticmethod
