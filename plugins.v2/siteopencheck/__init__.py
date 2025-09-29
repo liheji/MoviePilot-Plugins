@@ -220,7 +220,7 @@ class SiteOpenCheck(_PluginBase):
                         if res.status_code != 200:
                             raise RuntimeError(f"无法访问注册页面，状态码: {res.status_code}")
                         if '/signup.php' not in str(res.url):
-                            logger.warning(f"站点 {site_name} ({signup_url}) 最终跳转至 {str(res.url)}，非标准注册页，跳过解析")
+                            logger.warning(f"站点 {site_name} 最终跳转至 {str(res.url)}，非标准注册页，跳过解析")
                             return "unknown", f"不支持的注册模板: {str(res.url)}"
                         page_source = res.text
 
@@ -233,7 +233,7 @@ class SiteOpenCheck(_PluginBase):
                     time.sleep(self._retry_interval)
 
             if not page_source:
-                logger.warning(f"站点 {site_name} ({signup_url}) 获取注册页面失败: {last_error}")
+                logger.warning(f"站点 {site_name} 获取注册页面失败: {last_error}")
                 return "error", last_error or "未知错误"
 
             # 检查关闭注册的关键词（简体字和繁体字）
