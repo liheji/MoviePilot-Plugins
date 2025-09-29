@@ -28,7 +28,7 @@ class SiteOpenCheck(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "0.7"
+    plugin_version = "1.7"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -83,8 +83,8 @@ class SiteOpenCheck(_PluginBase):
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             logger.info("站点开注检查服务启动，立即运行一次")
             self._scheduler.add_job(func=self.__check_all_sites, trigger='date',
-                                run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
-                                name="站点开注检查")
+                                    run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
+                                    name="站点开注检查")
 
             # 关闭一次性开关
             self._onlyonce = False
@@ -146,10 +146,10 @@ class SiteOpenCheck(_PluginBase):
                     domain = site_info.get("id", "")
                     site_name = site_info.get("name", domain)
                     site_url = site_info.get("url", f"https://{domain}")
-                    
+
                     # 检查站点开注状态
                     status, message = self.__check_site_registration(site_url, site_name)
-                    
+
                     result = {
                         "domain": domain,
                         "name": site_name,
@@ -159,14 +159,14 @@ class SiteOpenCheck(_PluginBase):
                         "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }
                     check_results.append(result)
-                    
+
                     if status == "open":
                         open_sites.append(result)
                     elif status == "closed":
                         closed_sites.append(result)
                     else:
                         error_sites.append(result)
-                        
+
                 except Exception as e:
                     logger.error(f"检查站点 {site_info.get('id', 'unknown')} 时发生错误: {str(e)}")
                     error_sites.append({
@@ -188,7 +188,8 @@ class SiteOpenCheck(_PluginBase):
             if self._notify:
                 self.__send_notification(len(check_results), len(open_sites), len(closed_sites), len(error_sites))
 
-            logger.info(f"站点开注检查完成，共检查 {len(check_results)} 个站点，开注 {len(open_sites)} 个，关闭 {len(closed_sites)} 个，异常 {len(error_sites)} 个")
+            logger.info(
+                f"站点开注检查完成，共检查 {len(check_results)} 个站点，开注 {len(open_sites)} 个，关闭 {len(closed_sites)} 个，异常 {len(error_sites)} 个")
 
         except Exception as e:
             logger.error(f"检查所有站点时发生错误: {str(e)}")
@@ -198,7 +199,7 @@ class SiteOpenCheck(_PluginBase):
         try:
             # 构建注册页面URL
             signup_url = f"{site_url.rstrip('/')}/signup.php"
-            
+
             # 获取页面内容
             if self._use_playwright:
                 page_source = PlaywrightHelper().get_page_source(
@@ -214,10 +215,10 @@ class SiteOpenCheck(_PluginBase):
                     proxies=None,  # 不使用代理
                     timeout=self._timeout
                 ).get_res(url=signup_url)
-                
+
                 if not res or res.status_code != 200:
                     return "error", f"无法访问注册页面，状态码: {res.status_code if res else 'None'}"
-                
+
                 page_source = res.text
 
             if not page_source:
@@ -232,7 +233,7 @@ class SiteOpenCheck(_PluginBase):
                 "暂不开放注册",
                 "注册功能暂时关闭"
             ]
-            
+
             for keyword in closed_keywords:
                 if keyword in page_source:
                     return "closed", f"检测到关闭注册关键词: {keyword}"
@@ -243,15 +244,15 @@ class SiteOpenCheck(_PluginBase):
                 'button',
                 '注册'
             ]
-            
+
             # 检查是否有提交按钮或包含注册的按钮
             if 'type="submit"' in page_source:
                 return "open", "检测到提交按钮，可能开放注册"
-            
+
             # 检查包含"注册"的按钮
             if re.search(r'<button[^>]*>.*注册.*</button>', page_source, re.IGNORECASE):
                 return "open", "检测到注册按钮，可能开放注册"
-            
+
             # 检查包含"注册"的输入框
             if re.search(r'<input[^>]*>.*注册.*</input>', page_source, re.IGNORECASE):
                 return "open", "检测到注册输入框，可能开放注册"
@@ -340,7 +341,8 @@ class SiteOpenCheck(_PluginBase):
                         'component': 'VCol',
                         'props': {'cols': 12, 'md': 12},
                         'content': [
-                            {'component': 'VAlert', 'props': {'type': 'error', 'variant': 'tonal', 'text': f'生成页面时发生错误: {str(e)}'}}
+                            {'component': 'VAlert',
+                             'props': {'type': 'error', 'variant': 'tonal', 'text': f'生成页面时发生错误: {str(e)}'}}
                         ]
                     }
                 ]

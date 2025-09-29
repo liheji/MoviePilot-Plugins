@@ -38,12 +38,12 @@
     "name": "站点开注检查",
     "description": "检查各个站点是否开放注册，通过访问 /signup.php 页面判断开注状态。\\n支持 requests 和 PlaywrightHelper 两种方式获取页面内容。",
     "labels": "站点",
-    "version": "0.7",
+    "version": "1.7",
     "icon": "signin.png",
     "author": "liheji",
     "level": 2,
     "history": {
-      "v0.7": "初始版本"
+      "v1.7": "初始版本"
     }
   }
 }
