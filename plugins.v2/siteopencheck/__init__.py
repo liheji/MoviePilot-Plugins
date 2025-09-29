@@ -34,7 +34,7 @@ class SiteOpenCheck(_PluginBase):
     # 作者主页
     author_url = "https://github.com/liheji"
     # 插件配置项ID前缀
-    plugin_config_prefix = "sitechecknew_"
+    plugin_config_prefix = "siteopencheck_"
     # 加载顺序
     plugin_order = 10
     # 可使用的用户级别
