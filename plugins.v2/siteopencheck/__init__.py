@@ -28,7 +28,7 @@ class SiteOpenCheck(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "1.8"
+    plugin_version = "2.0"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -52,7 +52,6 @@ class SiteOpenCheck(_PluginBase):
     _notify: bool = False
     _use_playwright: bool = False
     _timeout: int = 15
-    _retry_times: int = 3
     _retry_interval: int = 5
 
     def init_plugin(self, config: dict = None):
@@ -71,8 +70,6 @@ class SiteOpenCheck(_PluginBase):
             self._notify = config.get("notify")
             self._use_playwright = config.get("use_playwright", False)
             self._timeout = config.get("timeout", 15)
-            self._retry_times = config.get("retry_times", 3)
-            self._retry_interval = config.get("retry_interval", 5)
 
             # 保存配置
             self.__update_config()
@@ -107,8 +104,6 @@ class SiteOpenCheck(_PluginBase):
             "notify": self._notify,
             "use_playwright": self._use_playwright,
             "cron": self._cron,
-            "retry_times": self._retry_times,
-            "retry_interval": self._retry_interval,
             "timeout": self._timeout
         })
 
@@ -142,17 +137,14 @@ class SiteOpenCheck(_PluginBase):
             error_sites = []
 
             # 遍历所有站点
-            for site_info in all_sites:
+            for domain, site_info in all_sites.items():
                 try:
-                    domain = site_info.get("id", "")
                     site_name = site_info.get("name", domain)
                     site_url = site_info.get("url", f"https://{domain}")
 
                     # 构建注册页面URL
                     signup_url = f"{site_url.rstrip('/')}/signup.php"
 
-                    logger.error(f"检查站点 {signup_url} 开注状态")
-                    
                     # 检查站点开注状态
                     status, message = self.__check_site_registration(signup_url, site_name)
 
@@ -204,43 +196,45 @@ class SiteOpenCheck(_PluginBase):
     def __check_site_registration(self, signup_url: str, site_name: str) -> Tuple[str, str]:
         """检查单个站点的注册状态"""
         try:
-            try:
-                if self._use_playwright:
-                    page_source = PlaywrightHelper().get_page_source(
-                        url=signup_url,
-                        cookies=None,  # 不携带cookie
-                        ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                        proxies=None,  # 不使用代理
-                        timeout=self._timeout
-                    )
-                else:
-                    res = RequestUtils(
-                        ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                        proxies=None,  # 不使用代理
-                        timeout=self._timeout
-                    ).get_res(url=signup_url)
+            import time
+            page_source = None
+            last_error = None
+            for attempt in range(2):
+                try:
+                    if self._use_playwright and attempt > 0:
+                        page_source = PlaywrightHelper().get_page_source(
+                            url=signup_url,
+                            cookies=None,
+                            ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                            proxies=None,
+                            timeout=self._timeout
+                        )
+                    else:
+                        res = RequestUtils(
+                            ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                            proxies=None,
+                            timeout=self._timeout
+                        ).get_res(url=signup_url)
+                        if not res:
+                            raise RuntimeError("无法访问注册页面，响应为空")
+                        if res.status_code != 200:
+                            raise RuntimeError(f"无法访问注册页面，状态码: {res.status_code}")
+                        if '/signup.php' not in str(res.url):
+                            logger.warning(f"站点 {site_name} ({signup_url}) 最终跳转至 {str(res.url)}，非标准注册页，跳过解析")
+                            return "unknown", f"不支持的注册模板: {str(res.url)}"
+                        page_source = res.text
 
-                    if not res:
-                        error_msg = "无法访问注册页面，请求失败"
-                        logger.warning(f"站点 {site_name} ({signup_url}) 获取注册页面失败: {error_msg}")
-                        return "error", error_msg
-                    
-                    if res.status_code != 200:
-                        error_msg = f"无法访问注册页面，状态码: {res.status_code}"
-                        logger.warning(f"站点 {site_name} ({signup_url}) 获取注册页面失败: {error_msg}")
-                        return "error", error_msg
+                    if page_source:
+                        break
 
-                    page_source = res.text
+                    raise RuntimeError("无法获取页面内容，发生未知错误")
+                except Exception as e:
+                    last_error = str(e)
+                    time.sleep(self._retry_interval)
 
-                if not page_source:
-                    error_msg = "无法获取页面内容"
-                    logger.warning(f"站点 {site_name} ({signup_url}) 获取注册页面失败: {error_msg}")
-                    return "error", error_msg
-                    
-            except Exception as e:
-                error_msg = f"获取页面内容时发生异常: {str(e)}"
-                logger.warning(f"站点 {site_name} ({signup_url}) 获取注册页面失败: {error_msg}")
-                return "error", error_msg
+            if not page_source:
+                logger.warning(f"站点 {site_name} ({signup_url}) 获取注册页面失败: {last_error}")
+                return "error", last_error or "未知错误"
 
             # 检查关闭注册的关键词（简体字和繁体字）
             closed_keywords = [
@@ -270,13 +264,6 @@ class SiteOpenCheck(_PluginBase):
                 "關閉註冊",
                 "註冊暫停",
                 "暫停註冊",
-                # 英文
-                "registration closed",
-                "registration disabled",
-                "registration temporarily closed",
-                "registration suspended",
-                "closed registration",
-                "disabled registration"
             ]
 
             for keyword in closed_keywords:
@@ -297,12 +284,6 @@ class SiteOpenCheck(_PluginBase):
                 "免費註冊",
                 "新用戶註冊",
                 "用戶註冊",
-                # 英文
-                "register",
-                "registration",
-                "sign up",
-                "signup",
-                "create account"
             ]
 
             # 检查是否有提交按钮或包含注册的按钮
@@ -320,7 +301,8 @@ class SiteOpenCheck(_PluginBase):
                     return "open", f"检测到注册输入框，可能开放注册: {keyword}"
 
             # 检查表单中的注册相关字段
-            if re.search(r'<form[^>]*>.*(?:注册|註冊|register|signup).*</form>', page_source, re.IGNORECASE | re.DOTALL):
+            if re.search(r'<form[^>]*>.*(?:注册|註冊|register|signup).*</form>', page_source,
+                         re.IGNORECASE | re.DOTALL):
                 return "open", "检测到注册表单，可能开放注册"
 
             # 如果没有明确的开放或关闭标识，返回未知
@@ -517,7 +499,7 @@ class SiteOpenCheck(_PluginBase):
                                                         'component': 'VSwitch',
                                                         'props': {
                                                             'model': 'use_playwright',
-                                                            'label': '使用浏览器仿真',
+                                                            'label': '首次失败尝试仿真',
                                                             'color': 'primary',
                                                             'hide-details': True
                                                         }
@@ -598,7 +580,7 @@ class SiteOpenCheck(_PluginBase):
                                                 'component': 'VCol',
                                                 'props': {
                                                     'cols': 12,
-                                                    'sm': 4
+                                                    'sm': 6
                                                 },
                                                 'content': [
                                                     {
@@ -618,31 +600,7 @@ class SiteOpenCheck(_PluginBase):
                                                 'component': 'VCol',
                                                 'props': {
                                                     'cols': 12,
-                                                    'sm': 4
-                                                },
-                                                'content': [
-                                                    {
-                                                        'component': 'VSelect',
-                                                        'props': {
-                                                            'model': 'retry_times',
-                                                            'label': '重试次数',
-                                                            'items': [
-                                                                {'title': '1次', 'value': 1},
-                                                                {'title': '2次', 'value': 2},
-                                                                {'title': '3次', 'value': 3}
-                                                            ],
-                                                            'variant': 'outlined',
-                                                            'color': 'primary',
-                                                            'hide-details': True
-                                                        }
-                                                    }
-                                                ]
-                                            },
-                                            {
-                                                'component': 'VCol',
-                                                'props': {
-                                                    'cols': 12,
-                                                    'sm': 4
+                                                    'sm': 6
                                                 },
                                                 'content': [
                                                     {
@@ -676,7 +634,5 @@ class SiteOpenCheck(_PluginBase):
             "notify": False,
             "use_playwright": False,
             "cron": "0 9 * * *",
-            "retry_times": 3,
-            "retry_interval": 5,
             "timeout": 15
         }
