@@ -1,3 +1,49 @@
 {
-
+  "MedalWallNew": {
+    "name": "勋章墙-新版",
+    "description": "站点勋章购买提醒、统计、展示。\n基于 KoWming 的勋章墙改造而来，详情可参考 https://github.com/KoWming",
+    "labels": "站点",
+    "version": "2.0",
+    "icon": "https://raw.githubusercontent.com/liheji/MoviePilot-Plugins/main/icons/Medal.png",
+    "author": "liheji",
+    "level": 2,
+    "release": true,
+    "history": {
+      "v2.0": "修复 zmpt、ptzone 站点解析。",
+      "v1.1": "新增适配多个站点，优化消息推送结构。",
+      "v1.0": "初始版本。"
+    }
+  },
+  "AutoSignInNew": {
+    "name": "站点自动签到-新版",
+    "description": "自动模拟登录、签到站点。\n基于 thsrite 的自动签到改造而来，详情可参考 https://github.com/thsrite",
+    "labels": "站点",
+    "version": "3.0",
+    "icon": "signin.png",
+    "author": "liheji",
+    "level": 2,
+    "release": true,
+    "history": {
+      "v3.0": "修复北洋园团签到",
+      "v2.7": "站点请求使用站点设置的超时时间",
+      "v2.6": "感谢madrays佬提供的UI!",
+      "v2.5.4": "增加保号风险提示",
+      "v2.5.3": "优化执行周期输入，需要MoviePilot v2.2.1+",
+      "v2.5.2": "修复HDArea签到",
+      "v2.5.1": "修复空签到失败问题",
+      "v2.5": "MoviePilot V2 版本站点自动签到插件"
+    }
+  },
+  "SiteOpenCheck": {
+    "name": "站点开注检查",
+    "description": "检查各个站点是否开放注册，通过访问 /signup.php 页面判断开注状态。\\n支持 requests 和 PlaywrightHelper 两种方式获取页面内容。",
+    "labels": "站点",
+    "version": "1.7",
+    "icon": "signin.png",
+    "author": "liheji",
+    "level": 2,
+    "history": {
+      "v1.7": "初始版本"
+    }
+  }
 }
