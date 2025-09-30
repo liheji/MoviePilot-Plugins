@@ -11,7 +11,7 @@ class ZhuqueOpenCheckHandler(_ISiteOpenCheckHandler):
 
     def build_signup_url(self, site_info: Dict[str, Any]) -> str:
         site_url = site_info.get("url", "")
-        return f"{site_url.rstrip('/')}/entry/regist"
+        return f"{site_url.rstrip('/')}/api/user/registStatus"
 
     def check(self, site_info: Dict[str, Any]) -> Tuple[str, str]:
         # 构建注册URL
@@ -20,9 +20,7 @@ class ZhuqueOpenCheckHandler(_ISiteOpenCheckHandler):
         # 获取页面
         page_source, final_url = self.get_page_source(signup_url)
 
-        closed_keywords = ["未开放自由注册"]
-        for keyword in closed_keywords:
-            if keyword in page_source:
-                return "closed", f"检测到关闭注册关键词: {keyword}"
+        if '"registOpen":true' in page_source:
+            return "open", f"检测到开放注册关键词registOpen:true，可能开放注册"
 
-        return "open", "未检测到关闭注册关键词，可能开放注册"
+        return "closed", "未检测到开放注册关键词"
