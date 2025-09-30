@@ -1,5 +1,4 @@
 # 标准库
-import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -12,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.core.config import settings
 from app.core.event import eventmanager
 from app.helper.sites import SitesHelper
+from app.helper.module import ModuleHelper
 from app.helper.browser import PlaywrightHelper
 from app.log import logger
 from app.plugins import _PluginBase
@@ -28,7 +28,7 @@ class SiteOpenCheck(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "2.0"
+    plugin_version = "2.1"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -44,6 +44,8 @@ class SiteOpenCheck(_PluginBase):
     _scheduler: Optional[BackgroundScheduler] = None
     # 站点助手实例
     sites: SitesHelper = None
+    # 加载的站点处理器
+    _site_schema: list = []
 
     # 配置属性
     _enabled: bool = False
@@ -73,6 +75,12 @@ class SiteOpenCheck(_PluginBase):
 
             # 保存配置
             self.__update_config()
+
+        # 加载模块
+        if self._enabled or self._onlyonce:
+            self._site_schema = ModuleHelper.load('app.plugins.siteopencheck.sites',
+                                                  filter_func=lambda _, obj: hasattr(obj, 'match'))
+            logger.info(f"已加载 {len(self._site_schema)} 个站点注册处理器")
 
         # 立即运行一次
         if self._onlyonce:
@@ -119,15 +127,31 @@ class SiteOpenCheck(_PluginBase):
             }]
         return []
 
+    def __get_all_sites(self) -> Dict[str, Any]:
+        """获取过滤后的站点列表，保留 public=false 的站点"""
+        all_sites = self.sites.get_indexsites()
+        if not all_sites:
+            logger.error("未获取到站点信息")
+            return {}
+
+        # 过滤站点，保留 public=false 的站点
+        filtered_sites = {}
+        for domain, site_info in all_sites.items():
+            # 私有站点 & 没有其他域名
+            if not site_info.get("public", True) and domain in site_info.get("url", ""):
+                filtered_sites[domain] = site_info
+
+        logger.info(f"获取到 {len(filtered_sites)} 个PT站点")
+        return filtered_sites
+
     def __check_all_sites(self):
         """检查所有站点的开注状态"""
         logger.info("开始检查所有站点的开注状态")
         try:
-            # 获取所有站点
-            all_sites = self.sites.get_indexsites()
-            logger.info(f"获取到 {len(all_sites)} 个站点")
+            # 获取过滤后的站点
+            all_sites = self.__get_all_sites()
             if not all_sites:
-                logger.error("未获取到站点信息")
+                logger.warning("没有需要检查的站点")
                 return
 
             # 存储检查结果
@@ -142,23 +166,20 @@ class SiteOpenCheck(_PluginBase):
                     site_name = site_info.get("name", domain)
                     site_url = site_info.get("url", f"https://{domain}")
 
-                    # 构建注册页面URL
-                    signup_url = f"{site_url.rstrip('/')}/signup.php"
+                    # 检查站点开注状态（全部委托给处理器）
+                    check_result = self.__check_site_registration(site_info)
 
-                    # 检查站点开注状态
-                    status, message = self.__check_site_registration(signup_url, site_name)
-
-                    result = {
+                    # 直接使用处理器返回的结果，只添加必要的字段
+                    result = check_result.copy()
+                    result.update({
                         "domain": domain,
                         "name": site_name,
                         "url": site_url,
-                        "signup_url": signup_url,  # 添加注册页面URL
-                        "status": status,
-                        "message": message,
                         "check_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    }
+                    })
                     check_results.append(result)
 
+                    status = result.get("status", "unknown")
                     if status == "open":
                         open_sites.append(result)
                     elif status == "closed":
@@ -193,124 +214,48 @@ class SiteOpenCheck(_PluginBase):
         except Exception as e:
             logger.error(f"检查所有站点时发生错误: {str(e)}")
 
-    def __check_site_registration(self, signup_url: str, site_name: str) -> Tuple[str, str]:
+    def __check_site_registration(self, site_info: Dict[str, Any]) -> Dict[str, Any]:
         """检查单个站点的注册状态"""
+        signup_url = ''
         try:
-            import time
-            page_source = None
-            last_error = None
-            for attempt in range(2):
-                try:
-                    if self._use_playwright and attempt > 0:
-                        page_source = PlaywrightHelper().get_page_source(
-                            url=signup_url,
-                            cookies=None,
-                            ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                            proxies=None,
-                            timeout=self._timeout
-                        )
-                    else:
-                        res = RequestUtils(
-                            ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                            proxies=None,
-                            timeout=self._timeout
-                        ).get_res(url=signup_url)
-                        if not res:
-                            raise RuntimeError("无法访问注册页面，响应为空")
-                        if res.status_code != 200:
-                            raise RuntimeError(f"无法访问注册页面，状态码: {res.status_code}")
-                        if '/signup.php' not in str(res.url):
-                            logger.warning(f"站点 {site_name} 最终跳转至 {str(res.url)}，非标准注册页，跳过解析")
-                            return "unknown", f"不支持的注册模板: {str(res.url)}"
-                        page_source = res.text
-
-                    if page_source:
-                        break
-
-                    raise RuntimeError("无法获取页面内容，发生未知错误")
-                except Exception as e:
-                    last_error = str(e)
-                    time.sleep(self._retry_interval)
-
-            if not page_source:
-                logger.warning(f"站点 {site_name} 获取注册页面失败: {last_error}")
-                return "error", last_error or "未知错误"
-
-            # 检查关闭注册的关键词（简体字和繁体字）
-            closed_keywords = [
-                # 简体字
-                "自由注册当前关闭",
-                "对不起",
-                "抱歉",
-                "注册已关闭",
-                "暂不开放注册",
-                "注册功能暂时关闭",
-                "注册暂时关闭",
-                "注册功能已关闭",
-                "暂时关闭注册",
-                "注册已暂停",
-                # 繁体字
-                "自由註冊當前關閉",
-                "對不起",
-                "抱歉",
-                "註冊已關閉",
-                "暫不開放註冊",
-                "註冊功能暫時關閉",
-                "註冊暫時關閉",
-                "註冊功能已關閉",
-                "暫時關閉註冊",
-                "註冊已暫停",
-                "註冊關閉",
-                "關閉註冊",
-                "註冊暫停",
-                "暫停註冊",
-            ]
-
-            for keyword in closed_keywords:
-                if keyword in page_source:
-                    return "closed", f"检测到关闭注册关键词: {keyword}"
-
-            # 检查开放注册的关键词（简体字、繁体字和英文）
-            open_keywords = [
-                # 简体字
-                "注册",
-                "立即注册",
-                "免费注册",
-                "新用户注册",
-                "用户注册",
-                # 繁体字
-                "註冊",
-                "立即註冊",
-                "免費註冊",
-                "新用戶註冊",
-                "用戶註冊",
-            ]
-
-            # 检查是否有提交按钮或包含注册的按钮
-            if 'type="submit"' in page_source:
-                return "open", "检测到提交按钮，可能开放注册"
-
-            # 检查包含注册关键词的按钮
-            for keyword in open_keywords:
-                if re.search(rf'<button[^>]*>.*{re.escape(keyword)}.*</button>', page_source, re.IGNORECASE):
-                    return "open", f"检测到注册按钮，可能开放注册: {keyword}"
-
-            # 检查包含注册关键词的输入框
-            for keyword in open_keywords:
-                if re.search(rf'<input[^>]*>.*{re.escape(keyword)}.*</input>', page_source, re.IGNORECASE):
-                    return "open", f"检测到注册输入框，可能开放注册: {keyword}"
-
-            # 检查表单中的注册相关字段
-            if re.search(r'<form[^>]*>.*(?:注册|註冊|register|signup).*</form>', page_source,
-                         re.IGNORECASE | re.DOTALL):
-                return "open", "检测到注册表单，可能开放注册"
-
-            # 如果没有明确的开放或关闭标识，返回未知
-            return "unknown", "无法确定注册状态"
-
+            # 使用处理器执行完整检测
+            handler = self.__build_ins(site_info.get("url", ""))
+            signup_url = handler.build_signup_url(site_info)
+            status, message = handler.check(site_info)
+            return {
+                "status": status,
+                "message": message,
+                "signup_url": signup_url
+            }
         except Exception as e:
+            site_name = site_info.get("name", "unknown")
             logger.error(f"检查站点 {site_name} 注册状态时发生错误: {str(e)}")
-            return "error", f"检查失败: {str(e)}"
+            return {
+                "status": "error",
+                "message": f"检查失败: {str(e)}",
+                "signup_url": signup_url
+            }
+
+    def __build_ins(self, url) -> Any:
+        """构建站点处理器类"""
+        final_schema = None
+        for site_schema in self._site_schema:
+            try:
+                if site_schema.match(url):
+                    logger.info(f"使用特定注册处理器处理站点: {url}")
+                    final_schema = site_schema
+                    break
+            except Exception as e:
+                logger.error("站点模块加载失败：%s" % str(e))
+
+        if not final_schema:
+            # 未匹配到则返回基础处理器
+            from .sites.base import DefaultOpenCheckHandler
+            final_schema = DefaultOpenCheckHandler
+
+        ret_ins = final_schema()
+        ret_ins.init(self._timeout, self._use_playwright, self._retry_interval)
+        return ret_ins
 
     def __send_notification(self, total: int, open_count: int, closed_count: int, error_count: int):
         """发送通知消息"""
