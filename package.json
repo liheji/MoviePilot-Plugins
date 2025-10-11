@@ -38,12 +38,13 @@
     "name": "站点开注检查",
     "description": "检查各个站点是否开放注册，通过访问 /signup.php 页面判断开注状态。\\n支持 requests 和 PlaywrightHelper 两种方式获取页面内容。",
     "labels": "站点",
-    "version": "2.1",
+    "version": "2.2",
     "icon": "signin.png",
     "author": "liheji",
     "level": 2,
     "release": true,
     "history": {
+      "v2.2": "重构检查站点开注件插",
       "v2.1": "可手动适配各个站点",
       "v2.0": "初始版本"
     }
