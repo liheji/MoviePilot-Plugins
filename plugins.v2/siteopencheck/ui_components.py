@@ -4,20 +4,33 @@
 """
 from typing import List, Dict
 
-from app.log import logger
 
-
-class SiteCheckUIComponents:
+class SiteOpenCheckUIComponents:
     """站点开注检查UI组件生成器"""
 
     @staticmethod
-    def create_top_stats(total_sites: int, open_count: int, closed_count: int, error_count: int) -> Dict:
+    def create_top_stats(sites: List[Dict]) -> Dict:
         """创建顶部统计信息"""
+
+        # 按状态分组
+        total, open, closed, error, unknown = len(sites), 0, 0, 0, 0
+
+        for s in sites:
+            if s.get('status') == 'open':
+                open += 1
+            elif s.get('status') == 'closed':
+                closed += 1
+            elif s.get('status') == 'error':
+                error += 1
+            else:
+                unknown += 1
+
         top_stats = [
-            {'icon': 'mdi-web', 'color': '#16b1ff', 'value': total_sites, 'label': '站点总数'},
-            {'icon': 'mdi-check-circle', 'color': '#4caf50', 'value': open_count, 'label': '开注站点'},
-            {'icon': 'mdi-close-circle', 'color': '#f44336', 'value': closed_count, 'label': '关闭注册'},
-            {'icon': 'mdi-alert-circle', 'color': '#ff9800', 'value': error_count, 'label': '异常站点'},
+            {'icon': 'mdi-web', 'color': '#16b1ff', 'value': total, 'label': '站点总数'},
+            {'icon': 'mdi-check-circle', 'color': '#4caf50', 'value': open, 'label': '开注站点'},
+            {'icon': 'mdi-close-circle', 'color': '#f44336', 'value': closed, 'label': '关闭注册'},
+            {'icon': 'mdi-alert-circle', 'color': '#ff9800', 'value': error, 'label': '异常站点'},
+            {'icon': 'mdi-help-circle', 'color': '#16B1FF', 'value': unknown, 'label': '未知状态'},
         ]
 
         return {
@@ -35,7 +48,7 @@ class SiteCheckUIComponents:
                     'content': [
                         {
                             'component': 'VCol',
-                            'props': {'cols': 3, 'class': 'text-center px-1'},
+                            'props': {'cols': 2.4, 'class': 'text-center px-1'},
                             'content': [
                                 {'component': 'VIcon', 'props': {'size': '40', 'color': v['color'], 'class': 'mb-1'},
                                  'text': v['icon']},
@@ -77,25 +90,25 @@ class SiteCheckUIComponents:
 
         # 开注站点
         if open_sites:
-            site_rows.append(SiteCheckUIComponents._create_site_group(
+            site_rows.append(SiteOpenCheckUIComponents._create_site_group(
                 "开注站点", open_sites, "success", "mdi-check-circle"
             ))
 
         # 关闭注册站点
         if closed_sites:
-            site_rows.append(SiteCheckUIComponents._create_site_group(
+            site_rows.append(SiteOpenCheckUIComponents._create_site_group(
                 "关闭注册", closed_sites, "error", "mdi-close-circle"
             ))
 
         # 异常站点
         if error_sites:
-            site_rows.append(SiteCheckUIComponents._create_site_group(
+            site_rows.append(SiteOpenCheckUIComponents._create_site_group(
                 "异常站点", error_sites, "warning", "mdi-alert-circle"
             ))
 
         # 未知状态站点
         if unknown_sites:
-            site_rows.append(SiteCheckUIComponents._create_site_group(
+            site_rows.append(SiteOpenCheckUIComponents._create_site_group(
                 "未知状态", unknown_sites, "info", "mdi-help-circle"
             ))
 
@@ -179,7 +192,7 @@ class SiteCheckUIComponents:
                                                 'class': 'py-2',
                                                 'style': 'background:#f7f8fa; border-radius:12px; padding:18px 12px 12px 12px;'
                                             },
-                                            'content': SiteCheckUIComponents._create_site_items(sites)
+                                            'content': SiteOpenCheckUIComponents._create_site_items(sites)
                                         }
                                     ]
                                 }
@@ -196,8 +209,8 @@ class SiteCheckUIComponents:
         items = []
         for site in sites:
             status = site.get('status', 'unknown')
-            status_color = SiteCheckUIComponents._get_status_color(status)
-            status_icon = SiteCheckUIComponents._get_status_icon(status)
+            status_color = SiteOpenCheckUIComponents._get_status_color(status)
+            status_icon = SiteOpenCheckUIComponents._get_status_icon(status)
 
             items.append({
                 'component': 'VCard',

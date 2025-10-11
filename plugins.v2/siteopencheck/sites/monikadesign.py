@@ -1,6 +1,5 @@
 from typing import Dict, Any, Tuple
 
-from app.log import logger
 from app.plugins.siteopencheck.sites import _ISiteOpenCheckHandler
 
 

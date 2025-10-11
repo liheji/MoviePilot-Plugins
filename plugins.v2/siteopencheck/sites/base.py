@@ -1,7 +1,6 @@
 import re
 from typing import Dict, Any, Tuple
 
-from app.log import logger
 from app.plugins.siteopencheck.sites import _ISiteOpenCheckHandler
 
 
@@ -34,14 +33,14 @@ class DefaultOpenCheckHandler(_ISiteOpenCheckHandler):
             # 简体中文
             "自由注册当前关闭", "自由注册关闭", "对不起", "抱歉", "注册已关闭", "暂不开放注册", "注册功能暂时关闭",
             "注册暂时关闭", "注册功能已关闭", "暂时关闭注册", "注册已暂停", "注册关闭", "关闭注册", "注册暂停",
-            "暂停注册", "不开放自由注册", "封闭运行",
+            "暂停注册", "不开放自由注册", "封闭运行", "不对外开放注册",
             # 繁体
             "自由註冊當前關閉", "自由註冊關閉", "對不起", "抱歉", "註冊已關閉", "暫不開放註冊", "註冊功能暫時關閉",
             "註冊暫時關閉", "註冊功能已關閉", "暫時關閉註冊", "註冊已暫停", "註冊關閉", "關閉註冊", "註冊暫停",
             "暫停註冊", "不開放自由註冊",
             # 英文
-            "No moar open signups", "Signup-ul este momentan oprit",
-            "Free registration not engaged", "Registration is closed", "Registration is temporarily closed",
+            "Sorry", "No moar open signups", "Free registration not engaged", "Registration is closed",
+            "Registration is temporarily closed",
         ]
         for keyword in closed_keywords:
             if keyword in page_source:

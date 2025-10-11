@@ -1,6 +1,6 @@
 from typing import Dict, Any, Tuple
 
-from app.log import logger
+from app.utils.http import RequestUtils
 from app.plugins.siteopencheck.sites import _ISiteOpenCheckHandler
 
 
@@ -18,12 +18,16 @@ class TjuptOpenCheckHandler(_ISiteOpenCheckHandler):
         signup_url = self.build_signup_url(site_info)
 
         # 获取页面
-        page_source, final_url = self.get_page_source(signup_url)
+        res = RequestUtils(ua=self._ua, timeout=self._timeout).get_res(url=signup_url)
+        if res is None:
+            raise RuntimeError("无法访问页面，响应为空")
+        if res.status_code != 200:
+            raise RuntimeError(f"无法访问页面，状态码: {res.status_code}")
+
+        json_data = res.json()
 
         # 关键词匹配
-        closed_keywords = ["不开放自由注册"]
-        for keyword in closed_keywords:
-            if keyword in page_source:
-                return "closed", f"检测到关闭注册关键词: {keyword}"
+        if "不开放自由注册" in json_data['msg']:
+            return "closed", "检测到关闭注册关键词: 不开放自由注册"
 
         return "open", "未检测到关闭注册数据，可能开放注册"

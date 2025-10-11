@@ -1,6 +1,7 @@
 from typing import Dict, Any, Tuple
 
-from app.log import logger
+import re
+import requests
 from app.plugins.siteopencheck.sites import _ISiteOpenCheckHandler
 
 
@@ -18,9 +19,30 @@ class ZhuqueOpenCheckHandler(_ISiteOpenCheckHandler):
         signup_url = self.build_signup_url(site_info)
 
         # 获取页面
-        page_source, final_url = self.get_page_source(signup_url)
+        session = requests.Session()
+        session.headers.update({
+            "Host": "zhuque.in",
+            "User-Agent": self._ua,
+        })
+        page_res = session.get('https://zhuque.in/entry/regist')
+        if page_res.status_code != 200:
+            raise RuntimeError(f"无法访问注册页，状态码: {page_res.status_code}")
 
-        if '"registOpen":true' in page_source:
-            return "open", f"检测到开放注册关键词registOpen:true，可能开放注册"
+        match = re.search(r'name="x-csrf-token" content="(.+?)"', page_res.text)
+        if not match:
+            raise RuntimeError("未能在页面中找到 csrf-token")
+        csrf_token = match.group(1)
+        session.headers.update({
+            "x-csrf-token": csrf_token,
+        })
+        res = session.get(signup_url)
+        if res is None:
+            raise RuntimeError("无法访问页面，响应为空")
+        if res.status_code != 200:
+            raise RuntimeError(f"无法访问页面，状态码: {res.status_code}")
+
+        json_data = res.json()
+        if json_data['data']['registOpen']:
+            return "open", f"检测到开放注册关键词(registOpen=true)，可能开放注册"
 
         return "closed", "未检测到开放注册关键词"

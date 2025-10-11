@@ -52,7 +52,6 @@ class SiteOpenCheck(_PluginBase):
     _cron: str = ""
     _onlyonce: bool = False
     _notify: bool = False
-    _use_playwright: bool = False
     _timeout: int = 15
     _retry_interval: int = 5
 
@@ -70,7 +69,6 @@ class SiteOpenCheck(_PluginBase):
             self._cron = config.get("cron")
             self._onlyonce = config.get("onlyonce")
             self._notify = config.get("notify")
-            self._use_playwright = config.get("use_playwright", False)
             self._timeout = config.get("timeout", 15)
 
             # 保存配置
@@ -110,7 +108,6 @@ class SiteOpenCheck(_PluginBase):
             "enabled": self._enabled,
             "onlyonce": self._onlyonce,
             "notify": self._notify,
-            "use_playwright": self._use_playwright,
             "cron": self._cron,
             "timeout": self._timeout
         })
@@ -119,7 +116,7 @@ class SiteOpenCheck(_PluginBase):
         """注册插件公共服务"""
         if self._enabled and self._cron:
             return [{
-                "id": "SiteCheckNew",
+                "id": "SiteOpenCheck",
                 "name": "站点开注检查 - 定时任务",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.__check_all_sites,
@@ -154,6 +151,12 @@ class SiteOpenCheck(_PluginBase):
                 logger.warning("没有需要检查的站点")
                 return
 
+            old_check_results = self.get_data('check_results', 'siteopencheck') or []
+            skip_sites = set()
+            for s in old_check_results:
+                if s.get('status') == 'error' or s.get('status') == 'unknown':
+                    skip_sites.add(s.get("domain"))
+
             # 存储检查结果
             check_results = []
             open_sites = []
@@ -163,6 +166,10 @@ class SiteOpenCheck(_PluginBase):
             # 遍历所有站点
             for domain, site_info in all_sites.items():
                 try:
+                    if domain in skip_sites:
+                        logger.info(f"检测到上次访问该站点时出错，跳过站点 {domain} 的检查")
+                        continue
+
                     site_name = site_info.get("name", domain)
                     site_url = site_info.get("url", f"https://{domain}")
 
@@ -199,10 +206,7 @@ class SiteOpenCheck(_PluginBase):
                     })
 
             # 保存检查结果
-            self.save_data('check_results', check_results, 'sitecheck')
-            self.save_data('open_sites', open_sites, 'sitecheck')
-            self.save_data('closed_sites', closed_sites, 'sitecheck')
-            self.save_data('error_sites', error_sites, 'sitecheck')
+            self.save_data('check_results', check_results, 'siteopencheck')
 
             # 发送通知
             if self._notify:
@@ -254,7 +258,7 @@ class SiteOpenCheck(_PluginBase):
             final_schema = DefaultOpenCheckHandler
 
         ret_ins = final_schema()
-        ret_ins.init(self._timeout, self._use_playwright, self._retry_interval)
+        ret_ins.init(self._timeout, self._retry_interval)
         return ret_ins
 
     def __send_notification(self, total: int, open_count: int, closed_count: int, error_count: int):
@@ -298,29 +302,18 @@ class SiteOpenCheck(_PluginBase):
     def get_page(self) -> list:
         """获取页面数据"""
         try:
-            from .ui_components import SiteCheckUIComponents
+            from .ui_components import SiteOpenCheckUIComponents
 
             # 获取检查结果
-            check_results = self.get_data('check_results', 'sitecheck') or []
-            open_sites = self.get_data('open_sites', 'sitecheck') or []
-            closed_sites = self.get_data('closed_sites', 'sitecheck') or []
-            error_sites = self.get_data('error_sites', 'sitecheck') or []
-
-            # 统计信息
-            total_sites = len(check_results)
-            open_count = len(open_sites)
-            closed_count = len(closed_sites)
-            error_count = len(error_sites)
+            check_results = self.get_data('check_results', 'siteopencheck') or []
 
             # 创建顶部统计信息
-            top_row = SiteCheckUIComponents.create_top_stats(
-                total_sites, open_count, closed_count, error_count
-            )
+            top_row = SiteOpenCheckUIComponents.create_top_stats(check_results)
 
             # 创建站点列表
             site_rows = []
             if check_results:
-                site_rows = SiteCheckUIComponents.create_site_list(check_results)
+                site_rows = SiteOpenCheckUIComponents.create_site_list(check_results)
 
             # 页面结构
             return [top_row] + site_rows
@@ -401,7 +394,7 @@ class SiteOpenCheck(_PluginBase):
                                                 'component': 'VCol',
                                                 'props': {
                                                     'cols': 12,
-                                                    'sm': 3
+                                                    'sm': 4
                                                 },
                                                 'content': [
                                                     {
@@ -419,7 +412,7 @@ class SiteOpenCheck(_PluginBase):
                                                 'component': 'VCol',
                                                 'props': {
                                                     'cols': 12,
-                                                    'sm': 3
+                                                    'sm': 4
                                                 },
                                                 'content': [
                                                     {
@@ -437,25 +430,7 @@ class SiteOpenCheck(_PluginBase):
                                                 'component': 'VCol',
                                                 'props': {
                                                     'cols': 12,
-                                                    'sm': 3
-                                                },
-                                                'content': [
-                                                    {
-                                                        'component': 'VSwitch',
-                                                        'props': {
-                                                            'model': 'use_playwright',
-                                                            'label': '首次失败尝试仿真',
-                                                            'color': 'primary',
-                                                            'hide-details': True
-                                                        }
-                                                    }
-                                                ]
-                                            },
-                                            {
-                                                'component': 'VCol',
-                                                'props': {
-                                                    'cols': 12,
-                                                    'sm': 3
+                                                    'sm': 4
                                                 },
                                                 'content': [
                                                     {
@@ -577,7 +552,6 @@ class SiteOpenCheck(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "notify": False,
-            "use_playwright": False,
             "cron": "0 9 * * *",
             "timeout": 15
         }
