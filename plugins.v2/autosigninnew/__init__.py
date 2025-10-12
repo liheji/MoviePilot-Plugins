@@ -36,7 +36,7 @@ class AutoSignInNew(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "3.0"
+    plugin_version = "3.1"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -327,7 +327,7 @@ class AutoSignInNew(_PluginBase):
                                         'component': 'VSwitch',
                                         'props': {
                                             'model': 'notify',
-                                            'label': '失败发送通知',
+                                            'label': '失败通知（仅20:00后)',
                                         }
                                     }
                                 ]
@@ -1482,7 +1482,7 @@ class AutoSignInNew(_PluginBase):
             signin_message = failed_msg + retry_msg
 
             # 发送通知
-            if self._notify and len(signin_message) > 0:
+            if self._notify and len(signin_message) > 0 and datetime.now().hour >= 20:
                 signin_message = "\n".join([f'【{s[0]}】{s[1]}' for s in signin_message if s])
                 self.post_message(title=f"【站点自动{type_str}】",
                                   mtype=NotificationType.SiteMessage,

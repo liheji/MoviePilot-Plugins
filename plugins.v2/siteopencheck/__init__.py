@@ -28,7 +28,7 @@ class SiteOpenCheck(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "2.2"
+    plugin_version = "2.3"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -151,17 +151,19 @@ class SiteOpenCheck(_PluginBase):
                 logger.warning("没有需要检查的站点")
                 return
 
-            old_check_results = self.get_data('check_results', 'siteopencheck') or []
-            skip_sites = set()
-            for s in old_check_results:
-                if s.get('status') == 'error' or s.get('status') == 'unknown':
-                    skip_sites.add(s.get("domain"))
-
             # 存储检查结果
             check_results = []
             open_sites = []
             closed_sites = []
             error_sites = []
+
+            old_check_results = self.get_data('check_results') or []
+            skip_sites = set()
+            for s in old_check_results:
+                if s.get('status') == 'error' or s.get('status') == 'unknown':
+                    skip_sites.add(s.get("domain"))
+                    check_results.append(s)
+                    error_sites.append(s)
 
             # 遍历所有站点
             for domain, site_info in all_sites.items():
@@ -206,7 +208,7 @@ class SiteOpenCheck(_PluginBase):
                     })
 
             # 保存检查结果
-            self.save_data('check_results', check_results, 'siteopencheck')
+            self.save_data('check_results', check_results)
 
             # 发送通知
             if self._notify:
@@ -305,7 +307,7 @@ class SiteOpenCheck(_PluginBase):
             from .ui_components import SiteOpenCheckUIComponents
 
             # 获取检查结果
-            check_results = self.get_data('check_results', 'siteopencheck') or []
+            check_results = self.get_data('check_results') or []
 
             # 创建顶部统计信息
             top_row = SiteOpenCheckUIComponents.create_top_stats(check_results)
