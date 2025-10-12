@@ -20,6 +20,7 @@ from app.schemas.types import EventType
 from app.utils.http import RequestUtils
 from app.utils.security import SecurityUtils
 
+
 class MedalWallNew(_PluginBase):
     # 插件名称
     plugin_name = "勋章墙-新版"
@@ -28,7 +29,7 @@ class MedalWallNew(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/liheji/MoviePilot-Plugins/main/icons/Medal.png"
     # 插件版本
-    plugin_version = "2.0"
+    plugin_version = "2.1"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -81,7 +82,8 @@ class MedalWallNew(_PluginBase):
             self._retry_interval = config.get("retry_interval", 5)
 
             # 过滤掉已删除的站点
-            all_sites = [site.id for site in self.siteoper.list_order_by_pri()] + [site.get("id") for site in self.__custom_sites()]
+            all_sites = [site.id for site in self.siteoper.list_order_by_pri()] + [site.get("id") for site in
+                                                                                   self.__custom_sites()]
             self._chat_sites = [site_id for site_id in all_sites if site_id in self._chat_sites]
 
             # 保存配置
@@ -99,8 +101,8 @@ class MedalWallNew(_PluginBase):
                 self._scheduler = BackgroundScheduler(timezone=settings.TZ)
                 logger.info("勋章墙服务启动，立即运行一次")
                 self._scheduler.add_job(func=self.__process_all_sites, trigger='date',
-                                    run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
-                                    name="勋章墙")
+                                        run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
+                                        name="勋章墙")
 
                 # 关闭一次性开关
                 self._onlyonce = False
@@ -134,7 +136,7 @@ class MedalWallNew(_PluginBase):
         if self._enabled and self._cron:
             return [{
                 "id": "MedalWallNew",
-                "name": "勋章墙 - 定时任务",
+                "name": "勋章墙新版 - 定时任务",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.__process_all_sites,
                 "kwargs": {}
@@ -184,7 +186,11 @@ class MedalWallNew(_PluginBase):
                     if buy_medals:
                         all_buy_medals.extend(buy_medals)
                         # 只将可购买的勋章加入推送列表
-                        notify_medals.extend([m for m in buy_medals if (m.get('purchase_status') or '').strip() in ['购买', '赠送']])
+                        notify_medals.extend([
+                            m for m in buy_medals
+                            if ((m.get('purchase_status') or '').strip() in ['购买', '赠送']) and
+                               float(str(m.get('bonus_rate', '')).replace(",", "").replace("%", "")) >= 0
+                        ])
 
                 except Exception as e:
                     logger.error(f"处理站点 {site_id} 时发生错误: {str(e)}")
@@ -195,7 +201,7 @@ class MedalWallNew(_PluginBase):
                 self.__send_notification(notify_medals)
 
             # 保存所有勋章数据
-            self.save_data('medals', all_buy_medals, 'zmmedal')
+            self.save_data('medals', all_buy_medals, 'medalwallnew')
 
         except Exception as e:
             logger.error(f"处理所有站点时发生错误: {str(e)}")
@@ -224,7 +230,7 @@ class MedalWallNew(_PluginBase):
                     medal['purchase_status'] = '魔力值不足'
 
             # 保存数据到缓存
-            self.save_data(f'medals_{site_id}', medals, 'zmmedal')
+            self.save_data(f'medals_{site_id}', medals, 'medalwallnew')
 
             return medals
 
@@ -332,9 +338,9 @@ class MedalWallNew(_PluginBase):
             # 尝试不同的时间格式
             formats = [
                 "%Y-%m-%d %H:%M:%S",  # 标准格式
-                "%Y-%m-%d",           # 只有日期
+                "%Y-%m-%d",  # 只有日期
                 "%Y/%m/%d %H:%M:%S",  # 斜杠分隔
-                "%Y/%m/%d"            # 斜杠分隔只有日期
+                "%Y/%m/%d"  # 斜杠分隔只有日期
             ]
 
             for fmt in formats:
@@ -420,9 +426,9 @@ class MedalWallNew(_PluginBase):
             site_name_map = {}
 
             for site_id in site_ids:
-                medals = self.get_data(f'medals_{site_id}', 'zmmedal') or []
-                unhas_medals = self.get_data(f'unhas_medals_{site_id}', 'zmmedal') or []
-                has_medals = self.get_data(f'has_medals_{site_id}', 'zmmedal') or []
+                medals = self.get_data(f'medals_{site_id}', 'medalwallnew') or []
+                unhas_medals = self.get_data(f'unhas_medals_{site_id}', 'medalwallnew') or []
+                has_medals = self.get_data(f'has_medals_{site_id}', 'medalwallnew') or []
 
                 # 合并去重
                 site_medals = []
@@ -444,9 +450,13 @@ class MedalWallNew(_PluginBase):
             site_count = len(site_ids)
             medal_total = len(all_medals)
             buy_count = sum(1 for m in all_medals if (m.get('purchase_status') or '').strip() in ['购买', '赠送'])
-            owned_count = sum(1 for m in all_medals if (m.get('purchase_status') or '').strip() in ['已经购买', '已拥有'])
+            owned_count = sum(
+                1 for m in all_medals if (m.get('purchase_status') or '').strip() in ['已经购买', '已拥有'])
             not_afford_count = sum(1 for m in all_medals if (m.get('purchase_status') or '').strip() in ['魔力值不足'])
-            not_buy_count = sum(1 for m in all_medals if (m.get('purchase_status') or '').strip() in ['已过可购买时间', '未到可购买时间', '需要更多工分', '需要更多魔力值', '需要更多蝌蚪', '库存不足', '仅授予'])
+            not_buy_count = sum(1 for m in all_medals if
+                                (m.get('purchase_status') or '').strip() in ['已过可购买时间', '未到可购买时间',
+                                                                             '需要更多工分', '需要更多魔力值',
+                                                                             '需要更多蝌蚪', '库存不足', '仅授予'])
             unknown_count = sum(1 for m in all_medals if not (m.get('purchase_status') or '').strip())
 
             # 2. 顶部统计信息
@@ -474,7 +484,8 @@ class MedalWallNew(_PluginBase):
                         'component': 'VCol',
                         'props': {'cols': 12, 'md': 12},
                         'content': [
-                            {'component': 'VAlert', 'props': {'type': 'error', 'variant': 'tonal', 'text': f'生成勋章页面时发生错误: {str(e)}'}}
+                            {'component': 'VAlert', 'props': {'type': 'error', 'variant': 'tonal',
+                                                              'text': f'生成勋章页面时发生错误: {str(e)}'}}
                         ]
                     }
                 ]
@@ -487,9 +498,11 @@ class MedalWallNew(_PluginBase):
         cron_field_component = "VCronField" if version == "v2" else "VTextField"
 
         # 需要过滤没有勋章的站点名称列表
-        filtered_sites = ['星空', '高清杜比', '聆音', '朱雀', '馒头', '家园', '朋友', '我堡', '彩虹岛', '天空', '听听歌']
+        filtered_sites = ['星空', '高清杜比', '聆音', '朱雀', '馒头', '家园', '朋友', '我堡', '彩虹岛', '天空',
+                          '听听歌']
         # 获取站点列表并过滤
-        all_sites = [site for site in self.sites.get_indexers() if not site.get("public") and site.get("name") not in filtered_sites] + self.__custom_sites()
+        all_sites = [site for site in self.sites.get_indexers() if
+                     not site.get("public") and site.get("name") not in filtered_sites] + self.__custom_sites()
         # 构建站点选项
         site_options = [{"title": site.get("name"), "value": site.get("id")} for site in all_sites]
 
