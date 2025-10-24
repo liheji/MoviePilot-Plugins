@@ -36,7 +36,7 @@ class AutoSignInNew(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "3.1"
+    plugin_version = "3.2"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -146,6 +146,22 @@ class AutoSignInNew(_PluginBase):
                 if self._scheduler.get_jobs():
                     self._scheduler.print_jobs()
                     self._scheduler.start()
+
+        if self._clean:
+            # 清理签到详情
+            key = f"{datetime.now().month}月{datetime.now().day}日"
+            self.del_data(key=key)
+
+            # 清理签到标记信息
+            type_list = ['签到', '登录']
+            today = datetime.today().strftime('%Y-%m-%d')
+            for type_str in type_list:
+                self.del_data(key=type_str + "-" + today)
+
+            # 关闭清理开关
+            self._clean = False
+            # 保存配置
+            self.__update_config()
 
     def get_state(self) -> bool:
         return self._enabled

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import base64
 import re
 from abc import ABCMeta, abstractmethod
 from typing import Tuple
@@ -101,3 +102,54 @@ class _ISiteSigninHandler(metaclass=ABCMeta):
             if re.search(str(regex), html_text):
                 return True
         return False
+
+    @staticmethod
+    def download_image(img_url, site_cookie, ua, proxy, site):
+        """
+        Download image and convert to base64 data URI.
+        """
+        img_res = RequestUtils(cookies=site_cookie,
+                               ua=ua,
+                               proxies=proxy).get_res(url=img_url)
+        if not img_res or img_res.status_code != 200:
+            logger.error(f"{site} 获取图片 {img_url} 请求失败")
+            return False, ''
+
+        # Get MIME type
+        content_type = img_res.headers.get('Content-Type', '')
+        mime_type = _ISiteSigninHandler.__detect_mime_type(content_type, img_res.content)
+
+        if not mime_type:
+            return False, ''
+
+        # Base64 encoding
+        img_base64 = base64.b64encode(img_res.content).decode('utf-8')
+        return True, f"data:{mime_type};base64,{img_base64}"
+
+    @staticmethod
+    def __detect_mime_type(content_type: str, data: bytes) -> str:
+        """
+        Determine image MIME type from Content-Type header and file signature.
+        """
+        # Check common image signatures (magic numbers)
+        image_signatures = {
+            b'\xFF\xD8\xFF': 'image/jpeg',
+            b'\x89PNG\r\n\x1a\n': 'image/png',
+            b'GIF87a': 'image/gif',
+            b'GIF89a': 'image/gif',
+            b'RIFF': 'image/webp',  # WebP starts with RIFF
+            b'BM': 'image/bmp',
+        }
+
+        # Check file signature first
+        for signature, mime in image_signatures.items():
+            if data.startswith(signature):
+                return mime
+
+        # Fall back to Content-Type header
+        if content_type:
+            mime = content_type.split(';')[0].strip().lower()
+            if mime.startswith('image/'):
+                return mime
+
+        return ''

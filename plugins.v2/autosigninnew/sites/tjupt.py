@@ -102,7 +102,12 @@ class Tjupt(_ISiteSigninHandler):
         answers = list(zip(values, options))
         logger.info(f"获取到所有签到选项 {options}")
 
-        ret, result = openai.get_answer_with_img("\n".join(options), img_url)
+        ok, img_base64 = self.download_image(img_url, site_cookie, ua, proxy, site)
+        if not ok:
+            logger.error(f"签到失败，图片获取失败 {img_url}")
+            return False, '签到失败，图片获取失败'
+
+        ret, result = openai.get_answer_with_img("\n".join(options), img_base64)
         if not ret:
             logger.error("ChatGPT请求失败，未返回答案")
             return False, '签到失败，ChatGPT未返回答案'
