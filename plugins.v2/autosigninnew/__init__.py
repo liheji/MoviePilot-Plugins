@@ -36,7 +36,7 @@ class AutoSignInNew(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "3.2"
+    plugin_version = "3.3"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -61,6 +61,7 @@ class AutoSignInNew(_PluginBase):
     _onlyonce: bool = False
     _notify: bool = False
     _queue_cnt: int = 5
+    _notify_filters: str = ""
     _sign_sites: list = []
     _login_sites: list = []
     _retry_keyword = None
@@ -81,11 +82,22 @@ class AutoSignInNew(_PluginBase):
             self._onlyonce = config.get("onlyonce")
             self._notify = config.get("notify")
             self._queue_cnt = config.get("queue_cnt") or 5
+            self._notify_filters = config.get("notify_filters") or ''
             self._sign_sites = config.get("sign_sites") or []
             self._login_sites = config.get("login_sites") or []
             self._retry_keyword = config.get("retry_keyword")
             self._auto_cf = config.get("auto_cf")
             self._clean = config.get("clean")
+            try:
+                self.safe_eval(self._notify_filters or 'True', {
+                    'type_str': '',
+                    'hour': 0,
+                    'minute': 0,
+                    'freq': 0,
+                })
+            except Exception as e:
+                self._notify_filters = ''
+                logger.error(f"表达式：{self._notify_filters}， 错误信息：{str(e)}")
 
             # 过滤掉已删除的站点
             all_sites = [site.id for site in SiteOper().list_order_by_pri()] + [site.get("id") for site in
@@ -175,6 +187,7 @@ class AutoSignInNew(_PluginBase):
                 "cron": self._cron,
                 "onlyonce": self._onlyonce,
                 "queue_cnt": self._queue_cnt,
+                "notify_filters": self._notify_filters,
                 "sign_sites": self._sign_sites,
                 "login_sites": self._login_sites,
                 "retry_keyword": self._retry_keyword,
@@ -343,7 +356,7 @@ class AutoSignInNew(_PluginBase):
                                         'component': 'VSwitch',
                                         'props': {
                                             'model': 'notify',
-                                            'label': '失败通知（仅20:00后)',
+                                            'label': '失败通知(满足条件)',
                                         }
                                     }
                                 ]
@@ -461,6 +474,24 @@ class AutoSignInNew(_PluginBase):
                                 'component': 'VCol',
                                 'content': [
                                     {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'notify_filters',
+                                            'label': '失败通知条件',
+                                            'placeholder': '填写Python逻辑表达式，满足该条件才会通知。'
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'content': [
+                                    {
                                         'component': 'VSelect',
                                         'props': {
                                             'chips': True,
@@ -552,6 +583,31 @@ class AutoSignInNew(_PluginBase):
                                     {
                                         'component': 'VAlert',
                                         'props': {
+                                            'type': 'info',
+                                            'variant': 'tonal',
+                                            'text': "支持的变量如下："
+                                                    "1.通知类型（type_str:字符串），枚举值：签到、登录。"
+                                                    "2.当前时间（hour:数字; minute:数字），分别表示小时、分钟。"
+                                                    "3.通知次数（freq:数字），已经发送的通知数量。"
+                                                    " 例如：type_str=='签到' and hour>=20 and freq<=4 表示：通知类型为签到，且当前时间大于等于20:00，且已发送通知次数不超过4。"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VAlert',
+                                        'props': {
                                             'type': 'warning',
                                             'variant': 'tonal',
                                             'text': '不是所有的站点都会把程序自动登录/签到定义为用户活跃（比如馒头），提示签到/登录成功仍然存在掉号风险！请结合站点公告说明自行把握。'
@@ -571,6 +627,7 @@ class AutoSignInNew(_PluginBase):
             "onlyonce": False,
             "clean": False,
             "queue_cnt": 5,
+            "notify_filters": '',
             "sign_sites": [],
             "login_sites": [],
             "retry_keyword": "错误|失败"
@@ -1349,6 +1406,7 @@ class AutoSignInNew(_PluginBase):
         yesterday = today - timedelta(days=1)
         yesterday_str = yesterday.strftime('%Y-%m-%d')
         # 删除昨天历史
+        self.del_data(key=f"freq-{yesterday_str}")
         self.del_data(key=type_str + "-" + yesterday_str)
         self.del_data(key=f"{yesterday.month}月{yesterday.day}日")
 
@@ -1497,8 +1555,22 @@ class AutoSignInNew(_PluginBase):
             # 签到详细信息 仅失败--命中重试
             signin_message = failed_msg + retry_msg
 
+            # 获取已经发送的数量
+            cur_freq = int(self.get_data(key=f"freq-{today}") or 0)
+
+            need_notify = True
+            try:
+                need_notify = self.safe_eval(self._notify_filters or 'True', {
+                    'type_str': type_str,
+                    'hour': datetime.now().hour,
+                    'minute': datetime.now().minute,
+                    'freq': cur_freq,
+                })
+            except Exception as e:
+                logger.error(f"表达式：{self._notify_filters}， 错误信息：{str(e)}")
+
             # 发送通知
-            if self._notify and len(signin_message) > 0 and datetime.now().hour >= 20:
+            if self._notify and len(signin_message) > 0 and need_notify:
                 signin_message = "\n".join([f'【{s[0]}】{s[1]}' for s in signin_message if s])
                 self.post_message(title=f"【站点自动{type_str}】",
                                   mtype=NotificationType.SiteMessage,
@@ -1507,6 +1579,7 @@ class AutoSignInNew(_PluginBase):
                                        f"下次{type_str}数量: {len(retry_sites) if self._retry_keyword else 0} \n"
                                        f"{signin_message}"
                                   )
+                self.save_data(f"freq-{today}", cur_freq + 1)
             elif self._notify:
                 logger.info(f"全部{type_str}成功，无需发送通知消息")
 
@@ -1520,6 +1593,15 @@ class AutoSignInNew(_PluginBase):
                                   title=f"站点{type_str}任务失败！", userid=event.event_data.get("user"))
         # 保存配置
         self.__update_config()
+
+    @staticmethod
+    def safe_eval(expr: str, variables: dict):
+        # 将 C 风格逻辑换成 Python 风格
+        expr = expr.replace("&&", " and ")
+        expr = expr.replace("||", " or ")
+        expr = re.sub(r"!\s*", " not ", expr)
+        # 限制 eval 的上下文，只允许访问 variables
+        return eval(expr, {"__builtins__": None}, variables)
 
     def __build_class(self, url) -> Any:
         for site_schema in self._site_schema:
