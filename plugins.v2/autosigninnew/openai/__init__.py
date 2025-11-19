@@ -1,28 +1,50 @@
+# -*- coding: UTF-8 -*-
+
 from typing import List, Union
-import openai
+from openai import OpenAI
 
 
 class OpenAi(object):
     _api_key: str = None
     _api_url: str = None
     _model: str = "gpt-4o"
+    _client: OpenAI = None
 
     def __init__(self, api_key: str = None,
                  api_url: str = None,
                  proxy: dict = None,
                  model: str = None,
                  compatible: bool = False):
+
+        # 检查配置
+        if not self._api_key or not self._api_url:
+            return
+
         self._api_key = api_key
         self._api_url = api_url
-        if compatible:
-            openai.api_base = self._api_url
-        else:
-            openai.api_base = self._api_url + "/v1"
-        openai.api_key = self._api_key
-        if proxy and proxy.get("https"):
-            openai.proxy = proxy.get("https")
         if model:
             self._model = model
+
+        # 初始化客户端
+        base_url = self._api_url
+        if not compatible and base_url and not base_url.endswith('/v1'):
+            base_url = base_url.rstrip('/') + "/v1"
+
+        # 配置代理 - OpenAI SDK 2.8 使用 httpx
+        http_client = None
+        if proxy and proxy.get("https"):
+            import httpx
+            http_client = httpx.Client(
+                proxy=proxy.get("https"),
+                timeout=60.0  # 设置超时时间
+            )
+
+        self._client = OpenAI(
+            api_key=self._api_key,
+            base_url=base_url,
+            http_client=http_client,
+            timeout=60.0  # 默认超时 60 秒
+        )
 
     def __get_model(self, message: Union[str, List[dict]],
                     prompt: str = None,
@@ -85,7 +107,7 @@ class OpenAi(object):
                         }
                     ]
 
-        return openai.ChatCompletion.create(
+        return self._client.chat.completions.create(
             model=self._model,
             user=user,
             messages=message,
