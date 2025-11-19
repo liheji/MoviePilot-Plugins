@@ -26,7 +26,7 @@ class OpenAi:
                  timeout: float = 60.0):
 
         # 检查配置
-        if not self._api_key or not self._api_url:
+        if not api_key or not api_url:
             return
 
         self._api_key = api_key
@@ -39,27 +39,26 @@ class OpenAi:
             self._prompt = customize_prompt
 
         # 初始化 OpenAI 客户端
-        if self._api_key and self._api_url:
-            base_url = self._api_url
-            if not compatible and base_url and not base_url.endswith('/v1'):
-                base_url = base_url.rstrip('/') + "/v1"
+        base_url = self._api_url
+        if not compatible and base_url and not base_url.endswith('/v1'):
+            base_url = base_url.rstrip('/') + "/v1"
 
-            # 处理代理设置
-            http_client = None
-            if proxy and (proxy.get("https") or proxy.get("http")):
-                import httpx
-                http_client = httpx.Client(
-                    proxy=proxy.get("https") or proxy.get("http"),
-                    timeout=60.0  # 设置超时时间
-                )
-
-            # 初始化客户端
-            self._client = OpenAI(
-                api_key=self._api_key,
-                base_url=base_url,
-                http_client=http_client,
-                timeout=self._timeout if not http_client else None
+        # 处理代理设置
+        http_client = None
+        if proxy and (proxy.get("https") or proxy.get("http")):
+            import httpx
+            http_client = httpx.Client(
+                proxy=proxy.get("https") or proxy.get("http"),
+                timeout=60.0  # 设置超时时间
             )
+
+        # 初始化客户端
+        self._client = OpenAI(
+            api_key=self._api_key,
+            base_url=base_url,
+            http_client=http_client,
+            timeout=self._timeout if not http_client else None
+        )
 
     def get_state(self) -> bool:
         """检查客户端是否已初始化"""

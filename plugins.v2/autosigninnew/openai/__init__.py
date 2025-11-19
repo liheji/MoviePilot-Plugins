@@ -17,7 +17,7 @@ class OpenAi(object):
                  compatible: bool = False):
 
         # 检查配置
-        if not self._api_key or not self._api_url:
+        if not api_key or not api_url:
             return
 
         self._api_key = api_key
@@ -54,6 +54,9 @@ class OpenAi(object):
         """
         获取模型
         """
+        if not self._client:
+            raise ValueError("OpenAI client not initialized. Please check API key and API URL.")
+
         if not isinstance(message, list):
             if img_url:
                 # 构建包含图片的消息
