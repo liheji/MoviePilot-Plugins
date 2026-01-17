@@ -28,7 +28,7 @@ class SiteOpenCheck(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "2.3"
+    plugin_version = "2.4"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页

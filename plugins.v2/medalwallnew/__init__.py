@@ -29,7 +29,7 @@ class MedalWallNew(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/liheji/MoviePilot-Plugins/main/icons/Medal.png"
     # 插件版本
-    plugin_version = "2.1"
+    plugin_version = "2.2"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
