@@ -1,1 +1,4 @@
-openai~=2.33.0
+openai~=2.33
+bencode.py
+webdavclient3
+watchdog
