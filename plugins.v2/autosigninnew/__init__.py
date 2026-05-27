@@ -36,7 +36,7 @@ class AutoSignInNew(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "3.4"
+    plugin_version = "3.5"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -69,6 +69,10 @@ class AutoSignInNew(_PluginBase):
     _start_time: int = None
     _end_time: int = None
     _auto_cf: int = 0
+    _proxy: bool = False
+    _openai_url: str = ''
+    _openai_key: str = ''
+    _openai_model: str = ''
 
     def init_plugin(self, config: dict = None):
 
@@ -88,6 +92,10 @@ class AutoSignInNew(_PluginBase):
             self._retry_keyword = config.get("retry_keyword")
             self._auto_cf = config.get("auto_cf")
             self._clean = config.get("clean")
+            self._proxy = config.get("proxy") or False
+            self._openai_url = config.get("openai_url") or ''
+            self._openai_key = config.get("openai_key") or ''
+            self._openai_model = config.get("openai_model") or ''
             try:
                 self.safe_eval(self._notify_filters or 'True', {
                     'type_str': '',
@@ -107,32 +115,15 @@ class AutoSignInNew(_PluginBase):
             # 保存配置
             self.__update_config()
 
-        chatgpt = self.get_config("ChatGPT")
-        if chatgpt and chatgpt.get("enabled"):
-            _compatible = chatgpt.get("compatible")
-            _openai_url = chatgpt.get("openai_url")
-            _openai_key = chatgpt.get("openai_key")
-            _openai_proxy = chatgpt.get("proxy")
-            _openai_model = chatgpt.get("model")
-
-            # 处理多个API密钥
-            if _openai_key:
-                _api_keys = [key.strip() for key in _openai_key.split(',') if key.strip()]
-                # 只启用第一个密钥
-                _openai_key = _api_keys[0]
-
-            if _openai_url and _openai_key:
-                self._openai = OpenAi(
-                    api_key=_openai_key,
-                    api_url=_openai_url,
-                    proxy=settings.PROXY if _openai_proxy else None,
-                    model=_openai_model,
-                    compatible=bool(_compatible)
-                )
-            else:
-                logger.error(f"ChatGPT初始化身边，插件信息不全")
+        if self._openai_url and self._openai_key:
+            self._openai = OpenAi(
+                api_key=self._openai_key,
+                api_url=self._openai_url,
+                proxy=settings.PROXY if self._proxy else None,
+                model=self._openai_model,
+            )
         else:
-            logger.error(f"ChatGPT插件未启用")
+            logger.warn(f"未配置大模型，依赖大模型签到的站点会失败！")
 
         # 加载模块
         if self._enabled or self._onlyonce:
@@ -193,6 +184,10 @@ class AutoSignInNew(_PluginBase):
                 "retry_keyword": self._retry_keyword,
                 "auto_cf": self._auto_cf,
                 "clean": self._clean,
+                "proxy": self._proxy,
+                "openai_url": self._openai_url,
+                "openai_key": self._openai_key,
+                "openai_model": self._openai_model,
             }
         )
 
@@ -333,7 +328,7 @@ class AutoSignInNew(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
-                                    'md': 3
+                                    'md': 2
                                 },
                                 'content': [
                                     {
@@ -341,6 +336,38 @@ class AutoSignInNew(_PluginBase):
                                         'props': {
                                             'model': 'enabled',
                                             'label': '启用插件',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 2
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'proxy',
+                                            'label': '模型走代理',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 2
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'onlyonce',
+                                            'label': '运行一次',
                                         }
                                     }
                                 ]
@@ -357,22 +384,6 @@ class AutoSignInNew(_PluginBase):
                                         'props': {
                                             'model': 'notify',
                                             'label': '失败通知(满足条件)',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    'cols': 12,
-                                    'md': 3
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'onlyonce',
-                                            'label': '立即运行一次',
                                         }
                                     }
                                 ]
@@ -532,6 +543,62 @@ class AutoSignInNew(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'openai_url',
+                                            'label': 'OpenAI Base Url',
+                                            'placeholder': 'https://api.openai.com/v1',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'openai_key',
+                                            'label': 'API密钥',
+                                            'placeholder': 'sk-xxx'
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
+                                    'md': 4
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'openai_model',
+                                            'label': '自定义模型',
+                                            'placeholder': 'gpt-4o',
+                                        }
+                                    }
+                                ]
+                            },
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    'cols': 12,
                                 },
                                 'content': [
                                     {
@@ -630,7 +697,11 @@ class AutoSignInNew(_PluginBase):
             "notify_filters": '',
             "sign_sites": [],
             "login_sites": [],
-            "retry_keyword": "错误|失败"
+            "retry_keyword": "错误|失败",
+            "proxy": False,
+            "openai_url": '',
+            "openai_key": '',
+            "openai_model": '',
         }
 
     def __custom_sites(self) -> List[Any]:
