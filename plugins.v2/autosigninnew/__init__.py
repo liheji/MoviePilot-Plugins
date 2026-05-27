@@ -122,6 +122,7 @@ class AutoSignInNew(_PluginBase):
                 proxy=settings.PROXY if self._proxy else None,
                 model=self._openai_model,
             )
+            logger.warn(f"模型加载完成，{self._openai_model}。")
         else:
             logger.warn(f"未配置大模型，依赖大模型签到的站点会失败！")
 
