@@ -36,7 +36,7 @@ class AutoSignInNew(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "3.5"
+    plugin_version = "3.6"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -1457,8 +1457,7 @@ class AutoSignInNew(_PluginBase):
         today = datetime.today()
         if self._start_time and self._end_time:
             if int(datetime.today().hour) < self._start_time or int(datetime.today().hour) > self._end_time:
-                logger.error(
-                    f"当前时间 {int(datetime.today().hour)} 不在 {self._start_time}-{self._end_time} 范围内，暂不执行任务")
+                logger.error(f"当前时间 {int(datetime.today().hour)} 不在 {self._start_time}-{self._end_time} 范围内，暂不执行任务")
                 return
         if event:
             logger.info("收到命令，开始站点签到 ...")

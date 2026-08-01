@@ -6,12 +6,13 @@ from typing import Tuple
 
 import chardet
 from ruamel.yaml import CommentedMap
-
+import time
 from app.core.config import settings
 from app.helper.browser import PlaywrightHelper
 from app.log import logger
 from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
+from app.helper.ocr import OcrHelper
 
 
 class _ISiteSigninHandler(metaclass=ABCMeta):
@@ -125,6 +126,32 @@ class _ISiteSigninHandler(metaclass=ABCMeta):
         # Base64 encoding
         img_base64 = base64.b64encode(img_res.content).decode('utf-8')
         return True, f"data:{mime_type};base64,{img_base64}"
+
+    @staticmethod
+    def captcha_ocr(img_url, site, site_cookie=None, ua=None, length: int = 6):
+        """
+        ocr识别多次，获取 length 位验证码
+        """
+        times = 0
+        ocr_result = None
+
+        while times <= 5:  # 循环识别5次
+            try:
+                # 进行 ocr 识别
+                ocr_result = OcrHelper().get_captcha_text(image_url=img_url,
+                                                          cookie=site_cookie,
+                                                          ua=ua)
+                logger.debug(f"OCR识别 {site} 验证码 {ocr_result}")
+                if ocr_result and len(ocr_result) == length:
+                    logger.info(f"OCR识别 {site}验证码成功 {ocr_result}")
+                    break
+            except Exception as e:
+                logger.error(f"OCR识别 {site} 验证码失败：{str(e)}")
+            times += 1
+            logger.debug(f"OCR识别 {site} 验证码失败，正在进行重试，目前重试次数 {times}")
+            time.sleep(1)
+
+        return ocr_result
 
     @staticmethod
     def __detect_mime_type(content_type: str, data: bytes) -> str:

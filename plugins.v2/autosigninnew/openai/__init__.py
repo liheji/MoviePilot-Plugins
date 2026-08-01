@@ -119,7 +119,7 @@ class OpenAi(object):
 
         try:
             result = self._chat(
-                message='请识别这张验证码图片中的内容',
+                message='请识别这张验证码图片中的验证码',
                 img_url=image,
                 prompt=sys_prompt,
                 temperature=0.2,
