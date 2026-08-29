@@ -89,6 +89,20 @@ class TangPingHelper(_PluginBase):
 
             self.__update_config()
 
+        # 站点自检：启用/立即运行前必须存在躺平PT站点，否则自动关闭并告警
+        any_onlyonce = self._onlyonce_lottery or self._onlyonce_redpacket or self._onlyonce_task
+        if self._enabled or any_onlyonce:
+            if self._get_site_info(quiet=True) is None:
+                logger.warning(
+                    "[躺平PT助手] 未检测到躺平PT站点(tangpt.top)，"
+                    "请先在站点管理中添加该站点及Cookie，插件已自动关闭"
+                )
+                self._enabled = False
+                self._onlyonce_lottery = False
+                self._onlyonce_redpacket = False
+                self._onlyonce_task = False
+                self.__update_config()
+
         # 检查是否需要立即运行
         any_onlyonce = self._onlyonce_lottery or self._onlyonce_redpacket or self._onlyonce_task
         if self._enabled or any_onlyonce:
@@ -159,7 +173,7 @@ class TangPingHelper(_PluginBase):
         domain = site.get("domain", "")
         return "tangpt.top" in url or "tangpt.top" in domain
 
-    def _get_site_info(self) -> Optional[Dict]:
+    def _get_site_info(self, quiet: bool = False) -> Optional[Dict]:
         """自动从站点助手匹配躺平PT站点（含 Cookie），无需手动选择"""
         try:
             indexers = SitesHelper().get_indexers()
@@ -172,7 +186,8 @@ class TangPingHelper(_PluginBase):
             traceback.print_exc()
             return None
 
-        logger.warning("未找到躺平PT站点（tangpt.top），请在站点管理中添加")
+        if not quiet:
+            logger.warning("未找到躺平PT站点（tangpt.top），请在站点管理中添加")
         return None
 
     def _get_base_url(self, site_info: Dict) -> str:
