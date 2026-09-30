@@ -2,7 +2,8 @@
 """
 北洋园PT开注助手（tjupthelper）
 从北洋园PT论坛「PT站点开放注册（邀请）信息汇总」主题抓取开注公告，每日运行一次（失败自动重试），
-解析开注起止时间并入库，插件页面按列表连续展示（开注过期折叠，点击加载），当前时间落在开注窗口时发送通知。
+帖子正文的站点名/站点地址/开注起止时间全部交给 OpenAI 兼容大模型识别（不再做本地字符匹配），
+识别结果入库后按列表连续展示（开注过期折叠，点击加载），当前时间落在开注窗口时发送通知。
 """
 import re
 import traceback
@@ -20,7 +21,19 @@ from app.plugins import _PluginBase
 from app.schemas import NotificationType
 from app.utils.http import RequestUtils
 
-from .parser import _coerce_dt, parse_forum_page, status_of
+from .openai import OpenAi
+from .parser import (
+    apply_ai_items,
+    build_batch_text,
+    merge_records,
+    parse_ai_response,
+    parse_forum_page,
+    scan_page,
+    scan_page_limit,
+    status_of,
+    window_text,
+    _coerce_dt,
+)
 
 
 class TjuptHelper(_PluginBase):
@@ -28,11 +41,12 @@ class TjuptHelper(_PluginBase):
     plugin_name = "北洋园PT开注助手"
     plugin_desc = (
         "每天从北洋园PT（tjupt.org）论坛「PT站点开放注册（邀请）信息汇总」主题抓取开注公告，"
-        "自动解析开注起止时间并入库，列表连续展示（开注过期折叠，点击加载），当前时间落在开注窗口时通知可注册站点。\n"
+        "由 OpenAI 兼容大模型识别站点名、站点地址与开注起止时间并入库，"
+        "列表连续展示（开注过期折叠，点击加载），当前时间落在开注窗口时通知可注册站点。\n"
         "成功执行一次即当日完成，失败按设定重试。"
     )
     plugin_icon = "Tjupt_A.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.2.0"
     plugin_author = "yilee"
     author_url = "https://github.com/yilee"
     plugin_config_prefix = "tjupthelper_"
@@ -48,12 +62,22 @@ class TjuptHelper(_PluginBase):
     _enabled: bool = False
     _notify: bool = True
     _onlyonce: bool = False
+    # 临时的一次性「重扫修正」（用户要求后续删除）：最多往前 3 页、不在已结束处停止，
+    # 用于修正此前识别错误的历史记录，跑完自动关闭
+    _rescan: bool = False
 
     _cron: str = "0 9 * * *"
     _topic_id: str = "15461"
     _max_pages: int = 5
     _retry_count: int = 3
     _retry_interval_min: int = 30
+
+    # OpenAI 兼容大模型（内容识别全部走 AI）
+    _openai: Optional[OpenAi] = None
+    _ai_url: str = ""
+    _ai_key: str = ""
+    _ai_model: str = ""
+    _ai_proxy: bool = False
 
     # ==================== 生命周期 ====================
 
@@ -65,6 +89,7 @@ class TjuptHelper(_PluginBase):
         self._enabled = config.get("enabled", False)
         self._notify = config.get("notify", True)
         self._onlyonce = config.get("onlyonce", False)
+        self._rescan = bool(config.get("rescan"))
 
         self._cron = config.get("cron") or "0 9 * * *"
         self._topic_id = str(config.get("topic_id") or "15461")
@@ -72,20 +97,53 @@ class TjuptHelper(_PluginBase):
         self._retry_count = int(config.get("retry_count") or 3)
         self._retry_interval_min = int(config.get("retry_interval_min") or 30)
 
-        # 站点自检：启用/立即运行前必须存在北洋园PT站点，否则自动关闭并告警
-        if self._enabled or self._onlyonce:
+        self._ai_url = config.get("ai_url") or ""
+        self._ai_key = config.get("ai_key") or ""
+        self._ai_model = config.get("ai_model") or ""
+        self._ai_proxy = bool(config.get("ai_proxy"))
+
+        self._openai = None
+        if self._ai_url and self._ai_key and self._ai_model:
+            try:
+                self._openai = OpenAi(
+                    api_key=self._ai_key,
+                    api_url=self._ai_url,
+                    model=self._ai_model,
+                    proxy=settings.PROXY if self._ai_proxy else None,
+                )
+                logger.info(f"[北洋园PT开注助手] 大模型加载完成：{self._ai_model}")
+            except Exception as e:
+                logger.error(f"[北洋园PT开注助手] 大模型初始化失败：{str(e)}")
+        else:
+            logger.warning(
+                "[北洋园PT开注助手] 未配置大模型（OpenAI Base URL / API密钥 / 模型），开注信息无法识别"
+            )
+
+        # 自检：启用/立即运行前必须存在北洋园PT站点和可用大模型，否则自动关闭并告警
+        if self._enabled or self._onlyonce or self._rescan:
+            disabled = False
             if self._get_site_info(quiet=True) is None:
                 logger.warning(
                     "[北洋园PT开注助手] 未检测到北洋园PT站点(tjupt.org)，"
                     "请先在站点管理中添加该站点及Cookie，插件已自动关闭"
                 )
+                disabled = True
+            if not self._openai:
+                logger.warning(
+                    "[北洋园PT开注助手] 未配置可用的大模型（OpenAI Base URL / API密钥 / 模型），"
+                    "开注信息全部依赖 AI 识别，插件已自动关闭"
+                )
+                disabled = True
+            if disabled:
                 self._enabled = False
                 self._onlyonce = False
+                self._rescan = False
 
         self.__update_config()
 
-        if self._enabled or self._onlyonce:
+        if self._enabled or self._onlyonce or self._rescan:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+            onlyonce = self._onlyonce
             if self._onlyonce:
                 logger.info("北洋园PT开注助手服务启动，立即运行一次")
                 self._scheduler.add_job(
@@ -98,6 +156,16 @@ class TjuptHelper(_PluginBase):
                 )
                 self._onlyonce = False
                 self.__update_config()
+            if self._rescan and self._enabled and not onlyonce:
+                logger.info("北洋园PT开注助手：重扫修正已开启，立即执行一次重扫（最多往前 3 页）")
+                self._scheduler.add_job(
+                    func=self._run_daily,
+                    kwargs={"force": True},
+                    trigger="date",
+                    run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
+                    name="北洋园PT开注助手重扫修正",
+                    id="tjupt_rescan",
+                )
             if self._scheduler.get_jobs():
                 self._scheduler.print_jobs()
                 self._scheduler.start()
@@ -135,8 +203,13 @@ class TjuptHelper(_PluginBase):
             "enabled": self._enabled,
             "notify": self._notify,
             "onlyonce": self._onlyonce,
+            "rescan": self._rescan,
+            "ai_proxy": self._ai_proxy,
             "cron": self._cron,
             "topic_id": self._topic_id,
+            "ai_url": self._ai_url,
+            "ai_key": self._ai_key,
+            "ai_model": self._ai_model,
             "max_pages": self._max_pages,
             "retry_count": self._retry_count,
             "retry_interval_min": self._retry_interval_min,
@@ -222,40 +295,77 @@ class TjuptHelper(_PluginBase):
             "site_url": post.get("site_url", ""),
             "reg_start": post.get("reg_start", ""),
             "reg_end": post.get("reg_end", ""),
+            "end_inferred": bool(post.get("end_inferred")),
+            "permanent": bool(post.get("permanent")),
+            "ai_note": post.get("ai_note", ""),
+            "ai_confidence": post.get("ai_confidence"),
             "content": (post.get("content") or "")[:500],
             "first_seen": first_seen,
             "updated": now_str,
         }
 
-    def _merge_records(self, collected: Dict[str, Dict]) -> List[Dict]:
+    @staticmethod
+    def _status_of_record(record: Dict, now: datetime) -> str:
+        """记录的开注状态（长期开放视为当前开注）。"""
+        return status_of(
+            _coerce_dt(record.get("reg_start")),
+            _coerce_dt(record.get("reg_end")),
+            now,
+            permanent=bool(record.get("permanent")),
+        )
+
+    def _merge_records(self, active: Dict[str, Dict],
+                       closed: Optional[Dict[str, Dict]] = None) -> Tuple[List[Dict], List[str]]:
+        """
+        合并入库：active 里的帖子新增或覆盖；closed 里的帖子只在库中已存在时覆盖
+        （用于修正之前识别错误的历史记录），不新增。
+        """
         existing = self.get_data("records") or []
-        by_pid = {r.get("pid"): r for r in existing if r.get("pid")}
-        for pid, rec in collected.items():
-            old = by_pid.get(pid)
-            rec["first_seen"] = old.get("first_seen") if old else rec["first_seen"]
-            by_pid[pid] = rec
-        records = sorted(by_pid.values(), key=lambda r: r.get("post_time") or "", reverse=True)
+        records, corrected = merge_records(existing, active, closed or {})
         self.save_data("records", records)
-        return records
+        if corrected:
+            logger.info(f"[开注] 已修正 {len(corrected)} 条历史记录：{', '.join(corrected)}")
+        return records, corrected
+
+    def _ai_parse_page(self, posts: List[Dict], now: datetime) -> Tuple[bool, List[Dict], str]:
+        """
+        调用大模型识别一页帖子的开注信息，返回 (是否成功, 补齐字段后的帖子列表, 错误信息)。
+        大模型内部已做「立即重试一次」，返回失败即代表本页放弃。
+        """
+        if not self._openai:
+            return False, [], "未配置大模型"
+        text = build_batch_text(posts)
+        ok, result = self._openai.extract_open_reg(text, now)
+        if not ok:
+            return False, [], result
+        parsed, items, err = parse_ai_response(result)
+        if not parsed:
+            return False, [], err
+        return True, apply_ai_items(posts, items, now), ""
 
     def _scan(self) -> Tuple[bool, str]:
         site_info = self._get_site_info()
         if not site_info:
             return False, "未找到北洋园PT站点(tjupt.org)，请先在站点管理中添加"
+        if not self._openai:
+            return False, "未配置大模型（OpenAI Base URL / API密钥 / 模型）"
 
         topic_id = self._topic_id
         base_url = self._get_base_url(site_info)
         last_page = self._get_last_page(site_info, topic_id)
         now = datetime.now()
+        rescan = self._rescan
+        page_limit = scan_page_limit(self._max_pages, rescan)
 
-        collected: Dict[str, Dict] = {}
-        terminated = False
+        active: Dict[str, Dict] = {}
+        closed: Dict[str, Dict] = {}
         pages_scanned = 0
+        pages_skipped = 0
 
         for page in range(last_page, -1, -1):
             pages_scanned += 1
-            if pages_scanned > self._max_pages:
-                logger.info(f"[开注] 已达最大扫描页数 {self._max_pages}，停止继续往旧页扫描")
+            if pages_scanned > page_limit:
+                logger.info(f"[开注] 已达最大扫描页数 {page_limit}，停止继续往旧页扫描")
                 break
 
             html = self._fetch_forum_page(site_info, page, topic_id)
@@ -268,32 +378,50 @@ class TjuptHelper(_PluginBase):
                 base_url=base_url,
             )
             logger.info(f"[开注] 第 {page + 1} 页解析到 {len(posts)} 个帖子")
+            if not posts:
+                continue
 
-            # 页面内最新优先（帖子在页面内由旧到新排列）
-            for post in reversed(posts):
-                reg_start = _coerce_dt(post.get("reg_start"))
-                reg_end = _coerce_dt(post.get("reg_end"))
-                # 方案A：遇到注册窗口已完全结束的帖子 -> 停止扫描更旧页面
-                if reg_end and reg_end < now:
-                    logger.info(
-                        f"[开注] PID {post.get('pid')} 注册窗口已结束({post.get('reg_end')})，停止扫描"
-                    )
-                    terminated = True
-                    break
-                if reg_start or reg_end:
-                    pid = post.get("pid", "")
-                    if not pid:
-                        continue
-                    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    collected.setdefault(pid, self._build_record(post, now_str))
+            ok, parsed_posts, err = self._ai_parse_page(posts, now)
+            if not ok:
+                # 已在本页立即重试过一次，仍然失败则跳过该页，继续往旧页扫描
+                pages_skipped += 1
+                logger.warning(f"[开注] 第 {page + 1} 页 AI 识别失败，已跳过：{err}")
+                continue
 
-            if terminated:
+            # 页面内最新优先；方案A：遇到开注已结束的帖子即停止往更旧页面扫描
+            # （重扫修正时不停止，把已结束的帖子也收上来修正历史记录；
+            #   重扫是一次性临时功能，最多往前 RESCAN_MAX_PAGES 页）
+            active_posts, closed_posts, stopped = scan_page(parsed_posts, now, stop_at_closed=not rescan)
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for post in active_posts:
+                pid = post.get("pid", "")
+                if not pid:
+                    continue
+                active.setdefault(pid, self._build_record(post, now_str))
+            for post in closed_posts:
+                pid = post.get("pid", "")
+                if not pid:
+                    continue
+                closed.setdefault(pid, self._build_record(post, now_str))
+            if stopped:
+                logger.info(f"[开注] 第 {page + 1} 页遇到已结束的开注公告，停止往更旧页面扫描")
                 break
 
-        if not collected:
-            logger.info("[开注] 本次未发现任何开注公告，但仍视为抓取成功")
-        self._merge_records(collected)
-        return True, f"处理完成：扫描 {pages_scanned} 页，更新 {len(collected)} 条开注公告"
+        _, corrected = self._merge_records(active, closed)
+
+        if rescan:
+            self._rescan = False
+            self.__update_config()
+            logger.info("[开注] 重扫已完成，已自动关闭该开关")
+
+        if not active:
+            logger.info("[开注] 本次未发现任何开放中/即将开放的开注公告，但仍视为抓取成功")
+        msg = f"处理完成：扫描 {pages_scanned} 页，更新 {len(active)} 条开注公告"
+        if corrected:
+            msg += f"，修正 {len(corrected)} 条历史记录"
+        if pages_skipped:
+            msg += f"，{pages_skipped} 页因 AI 识别失败被跳过"
+        return True, msg
 
     # ==================== 每日运行与重试 ====================
 
@@ -353,7 +481,7 @@ class TjuptHelper(_PluginBase):
         now = datetime.now()
         open_sites = []
         for r in records:
-            st = status_of(_coerce_dt(r.get("reg_start")), _coerce_dt(r.get("reg_end")), now)
+            st = self._status_of_record(r, now)
             if st == "open":
                 open_sites.append(r)
 
@@ -367,7 +495,7 @@ class TjuptHelper(_PluginBase):
         text = "\n".join(
             f"■ {r.get('site_name') or r.get('pid')}\n"
             f"地址：{r.get('site_url') or '-'}\n"
-            f"开注时间：{r.get('reg_start') or '-'} ~ {r.get('reg_end') or '-'}"
+            f"开注时间：{window_text(r)}"
             for r in new_open
         )
         try:
@@ -405,7 +533,7 @@ class TjuptHelper(_PluginBase):
             now = datetime.now()
             records = [
                 r for r in records
-                if status_of(_coerce_dt(r.get("reg_start")), _coerce_dt(r.get("reg_end")), now) == status
+                if self._status_of_record(r, now) == status
             ]
         return {
             "total": len(records),
@@ -448,9 +576,28 @@ class TjuptHelper(_PluginBase):
                 {
                     "component": "VRow",
                     "content": [
-                        switch(4, "enabled", "启用插件"),
-                        switch(4, "notify", "开注通知"),
-                        switch(4, "onlyonce", "立即运行一次"),
+                        switch(3, "enabled", "启用插件"),
+                        switch(3, "notify", "开注通知"),
+                        switch(3, "onlyonce", "立即运行一次"),
+                        switch(3, "ai_proxy", "AI走代理"),
+                    ],
+                },
+                # 第二行：重扫修正（一次性临时功能，跑完自动关闭）
+                {
+                    "component": "VRow",
+                    "content": [
+                        switch(6, "rescan", "重扫修正(历史识别错误)"),
+                        {
+                            "component": "VCol",
+                            "props": {"cols": 12, "sm": 6},
+                            "content": [{
+                                "component": "VAlert",
+                                "props": {"type": "warning", "variant": "tonal", "density": "compact",
+                                          "text": "打开并保存后立即重扫一次（最多往前 3 页）：不因开注已过期而停止，"
+                                                  "只重写库中已有记录的识别结果，已结束的注册绝不会新增进列表，"
+                                                  "跑完自动关闭该开关（临时功能）。"},
+                            }],
+                        },
                     ],
                 },
                 # 之后：输入项
@@ -465,9 +612,23 @@ class TjuptHelper(_PluginBase):
                 {
                     "component": "VRow",
                     "content": [
-                        field(4, "max_pages", "最大扫描页数", type="number", variant="outlined"),
-                        field(4, "retry_count", "失败重试次数", type="number", variant="outlined"),
-                        field(4, "retry_interval_min", "重试间隔(分钟)", type="number", variant="outlined"),
+                        field(6, "ai_url", "OpenAI Base URL",
+                              placeholder="https://api.openai.com/v1", variant="outlined"),
+                        field(6, "ai_key", "API密钥", placeholder="sk-xxx", variant="outlined"),
+                    ],
+                },
+                {
+                    "component": "VRow",
+                    "content": [
+                        field(6, "ai_model", "自定义模型", placeholder="gpt-4o", variant="outlined"),
+                        field(6, "max_pages", "最大扫描页数", type="number", variant="outlined"),
+                    ],
+                },
+                {
+                    "component": "VRow",
+                    "content": [
+                        field(6, "retry_count", "失败重试次数", type="number", variant="outlined"),
+                        field(6, "retry_interval_min", "重试间隔(分钟)", type="number", variant="outlined"),
                     ],
                 },
                 {
@@ -479,8 +640,10 @@ class TjuptHelper(_PluginBase):
                             "content": [{
                                 "component": "VAlert",
                                 "props": {"type": "info", "variant": "tonal", "density": "compact",
-                                          "text": "需先在站点管理中添加北洋园PT(tjupt.org)站点及Cookie。"
-                                                  "成功执行一次即当日完成，失败按设定重试。"},
+                                          "text": "开注信息全部由 OpenAI 兼容大模型识别，"
+                                                  "需填写 Base URL / API密钥 / 模型，否则插件会自动关闭；"
+                                                  "AI 调用失败会立即重试一次，仍然失败则跳过该页并记录日志。"
+                                                  "另需先在站点管理中添加北洋园PT(tjupt.org)站点及Cookie。"},
                             }],
                         },
                     ],
@@ -490,8 +653,13 @@ class TjuptHelper(_PluginBase):
             "enabled": False,
             "notify": True,
             "onlyonce": False,
+            "rescan": False,
+            "ai_proxy": False,
             "cron": "0 9 * * *",
             "topic_id": "15461",
+            "ai_url": "",
+            "ai_key": "",
+            "ai_model": "",
             "max_pages": 5,
             "retry_count": 3,
             "retry_interval_min": 30,
@@ -513,7 +681,7 @@ class TjuptHelper(_PluginBase):
         now = datetime.now()
         open_count = upcoming_count = closed_count = 0
         for r in records:
-            st = status_of(_coerce_dt(r.get("reg_start")), _coerce_dt(r.get("reg_end")), now)
+            st = self._status_of_record(r, now)
             if st == "open":
                 open_count += 1
             elif st == "upcoming":
@@ -595,7 +763,7 @@ class TjuptHelper(_PluginBase):
         now = datetime.now()
         active, closed = [], []
         for r in records:
-            st = status_of(_coerce_dt(r.get("reg_start")), _coerce_dt(r.get("reg_end")), now)
+            st = self._status_of_record(r, now)
             if st == "closed":
                 closed.append(r)
             else:
@@ -642,7 +810,7 @@ class TjuptHelper(_PluginBase):
 
     def _record_card(self, r: Dict) -> dict:
         now = datetime.now()
-        st = status_of(_coerce_dt(r.get("reg_start")), _coerce_dt(r.get("reg_end")), now)
+        st = self._status_of_record(r, now)
         color, label, icon = {
             "open": ("#22c55e", "当前开注", "mdi-check-circle"),
             "upcoming": ("#f59e0b", "即将开注", "mdi-clock-outline"),
@@ -683,7 +851,7 @@ class TjuptHelper(_PluginBase):
                                      },
                                      {"component": "div",
                                       "props": {"class": "text-body-2 mb-1", "style": "color: #374151;"},
-                                      "text": f"开注时间：{r.get('reg_start') or '-'} ~ {r.get('reg_end') or '-'}"},
+                                      "text": f"开注时间：{window_text(r)}"},
                                      {"component": "div",
                                       "props": {"class": "text-caption mt-2", "style": "color: #9ca3af;"},
                                       "text": f"发布：{r.get('post_time') or '-'}  by {r.get('username') or '-'}"},
