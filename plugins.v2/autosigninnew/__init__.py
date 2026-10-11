@@ -19,24 +19,25 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
 from app.utils.http import RequestUtils
-from app.utils.site import SiteUtils
 from app.utils.string import StringUtils
 from app.utils.timer import TimerUtils
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from ruamel.yaml import CommentedMap
 from app.plugins.autosigninnew.openai import OpenAi
-
+from app.plugins.autosigninnew.result import SiteResult, has_login_evidence, has_login_form, has_signin_evidence
 
 class AutoSignInNew(_PluginBase):
+    """按配置执行站点签到和模拟登录，并记录结果与发送通知。"""
+
     # 插件名称
     plugin_name = "站点自动签到-新版"
     # 插件描述
-    plugin_desc = "自动模拟登录、签到站点。\n基于 thsrite 的自动签到改造而来，详情可参考 https://github.com/thsrite"
+    plugin_desc = "自动模拟登录、签到站点，并支持大模型识别签到验证码。\n基于 thsrite 的自动签到改造而来，详情可参考 https://github.com/thsrite"
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "3.6"
+    plugin_version = "3.7"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -47,6 +48,11 @@ class AutoSignInNew(_PluginBase):
     plugin_order = 0
     # 可使用的用户级别
     auth_level = 2
+
+    # 持久化全选标记，执行时展开，自动包含后续新增站点。
+    _ALL_SITES = "all"
+    # 含当天的历史保留天数，与详情页读取范围保持一致。
+    _HISTORY_DAYS = 14
 
     # 定时器
     _scheduler: Optional[BackgroundScheduler] = None
@@ -61,7 +67,6 @@ class AutoSignInNew(_PluginBase):
     _onlyonce: bool = False
     _notify: bool = False
     _queue_cnt: int = 5
-    _notify_filters: str = ""
     _sign_sites: list = []
     _login_sites: list = []
     _retry_keyword = None
@@ -69,12 +74,14 @@ class AutoSignInNew(_PluginBase):
     _start_time: int = None
     _end_time: int = None
     _auto_cf: int = 0
+    _notify_filters: str = ""
     _proxy: bool = False
     _openai_url: str = ''
     _openai_key: str = ''
     _openai_model: str = ''
 
     def init_plugin(self, config: dict = None):
+        """加载配置并保留动态全选标记，注册需要立即执行的任务。"""
 
         # 停止现有任务
         self.stop_service()
@@ -86,12 +93,12 @@ class AutoSignInNew(_PluginBase):
             self._onlyonce = config.get("onlyonce")
             self._notify = config.get("notify")
             self._queue_cnt = config.get("queue_cnt") or 5
-            self._notify_filters = config.get("notify_filters") or ''
             self._sign_sites = config.get("sign_sites") or []
             self._login_sites = config.get("login_sites") or []
             self._retry_keyword = config.get("retry_keyword")
             self._auto_cf = config.get("auto_cf")
             self._clean = config.get("clean")
+            self._notify_filters = config.get("notify_filters") or ''
             self._proxy = config.get("proxy") or False
             self._openai_url = config.get("openai_url") or ''
             self._openai_key = config.get("openai_key") or ''
@@ -104,14 +111,16 @@ class AutoSignInNew(_PluginBase):
                     'freq': 0,
                 })
             except Exception as e:
-                self._notify_filters = ''
                 logger.error(f"表达式：{self._notify_filters}， 错误信息：{str(e)}")
+                self._notify_filters = ''
 
             # 过滤掉已删除的站点
             all_sites = [site.id for site in SiteOper().list_order_by_pri()] + [site.get("id") for site in
                                                                                 self.__custom_sites()]
-            self._sign_sites = [site_id for site_id in all_sites if site_id in self._sign_sites]
-            self._login_sites = [site_id for site_id in all_sites if site_id in self._login_sites]
+            self._sign_sites = ([self._ALL_SITES] if self._ALL_SITES in self._sign_sites else
+                                [site_id for site_id in all_sites if site_id in self._sign_sites])
+            self._login_sites = ([self._ALL_SITES] if self._ALL_SITES in self._login_sites else
+                                [site_id for site_id in all_sites if site_id in self._login_sites])
             # 保存配置
             self.__update_config()
 
@@ -124,7 +133,7 @@ class AutoSignInNew(_PluginBase):
             )
             logger.info(f"模型加载完成，{self._openai_model}。")
         else:
-            logger.warn(f"未配置大模型，依赖大模型签到的站点会失败！")
+            logger.warn("未配置大模型，依赖大模型签到的站点会失败！")
 
         # 加载模块
         if self._enabled or self._onlyonce:
@@ -151,26 +160,12 @@ class AutoSignInNew(_PluginBase):
                     self._scheduler.print_jobs()
                     self._scheduler.start()
 
-        if self._clean:
-            # 清理签到详情
-            key = f"{datetime.now().month}月{datetime.now().day}日"
-            self.del_data(key=key)
-
-            # 清理签到标记信息
-            type_list = ['签到', '登录']
-            today = datetime.today().strftime('%Y-%m-%d')
-            for type_str in type_list:
-                self.del_data(key=type_str + "-" + today)
-
-            # 关闭清理开关
-            self._clean = False
-            # 保存配置
-            self.__update_config()
-
     def get_state(self) -> bool:
+        """返回插件启用状态。"""
         return self._enabled
 
     def __update_config(self):
+        """保存原始站点选择，避免全选退化为固定站点列表。"""
         # 保存配置
         self.update_config(
             {
@@ -179,12 +174,12 @@ class AutoSignInNew(_PluginBase):
                 "cron": self._cron,
                 "onlyonce": self._onlyonce,
                 "queue_cnt": self._queue_cnt,
-                "notify_filters": self._notify_filters,
                 "sign_sites": self._sign_sites,
                 "login_sites": self._login_sites,
                 "retry_keyword": self._retry_keyword,
                 "auto_cf": self._auto_cf,
                 "clean": self._clean,
+                "notify_filters": self._notify_filters,
                 "proxy": self._proxy,
                 "openai_url": self._openai_url,
                 "openai_key": self._openai_key,
@@ -314,7 +309,8 @@ class AutoSignInNew(_PluginBase):
         # 站点的可选项（内置站点 + 自定义站点）
         customSites = self.__custom_sites()
 
-        site_options = ([{"title": site.name, "value": site.id}
+        site_options = ([{"title": "全部", "value": self._ALL_SITES}]
+                        + [{"title": site.name, "value": site.id}
                          for site in SiteOper().list_order_by_pri()]
                         + [{"title": site.get("name"), "value": site.get("id")}
                            for site in customSites])
@@ -510,7 +506,9 @@ class AutoSignInNew(_PluginBase):
                                             'multiple': True,
                                             'model': 'sign_sites',
                                             'label': '签到站点',
-                                            'items': site_options
+                                            'items': site_options,
+                                            'hint': '选择全部后自动包含后续新增站点',
+                                            'persistent-hint': True
                                         }
                                     }
                                 ]
@@ -530,7 +528,9 @@ class AutoSignInNew(_PluginBase):
                                             'multiple': True,
                                             'model': 'login_sites',
                                             'label': '登录站点',
-                                            'items': site_options
+                                            'items': site_options,
+                                            'hint': '选择全部后自动包含后续新增站点',
+                                            'persistent-hint': True
                                         }
                                     }
                                 ]
@@ -590,7 +590,7 @@ class AutoSignInNew(_PluginBase):
                                         }
                                     }
                                 ]
-                            },
+                            }
                         ]
                     },
                     {
@@ -611,7 +611,8 @@ class AutoSignInNew(_PluginBase):
                                                     '1、5位cron表达式；'
                                                     '2、配置间隔（小时），如2.3/9-23（9-23点之间每隔2.3小时执行一次）；'
                                                     '3、周期不填默认9-23点随机执行2次。'
-                                                    '每天首次全量执行，其余执行命中重试关键词的站点。'
+                                                    '每天首次全量执行，其余重试未确认登录或命中重试关键词的站点。'
+                                                    '已确认登录但签到未确认的站点会单独记录登录成功。'
                                         }
                                     }
                                 ]
@@ -695,17 +696,26 @@ class AutoSignInNew(_PluginBase):
             "onlyonce": False,
             "clean": False,
             "queue_cnt": 5,
-            "notify_filters": '',
             "sign_sites": [],
             "login_sites": [],
             "retry_keyword": "错误|失败",
+            "notify_filters": '',
             "proxy": False,
             "openai_url": '',
             "openai_key": '',
-            "openai_model": '',
+            "openai_model": ''
         }
 
+    def _resolve_site_ids(self, selected: list) -> list:
+        """为详情页展开全选标记，包含内置站点和已启用的自定义站点。"""
+        if self._ALL_SITES in selected:
+            return [site.id for site in SiteOper().list_order_by_pri()] + [
+                site.get("id") for site in self.__custom_sites()
+            ]
+        return selected
+
     def __custom_sites(self) -> List[Any]:
+        """读取已启用的自定义站点插件配置。"""
         custom_sites = []
         custom_sites_config = self.get_config("CustomSites")
         if custom_sites_config and custom_sites_config.get("enabled"):
@@ -716,27 +726,16 @@ class AutoSignInNew(_PluginBase):
         """
         拼装插件详情页面，需要返回页面配置，同时附带数据
         """
-        # 获取最近14天的日期数组
-        date_list = [(datetime.now() - timedelta(days=i)).date() for i in range(14)]
+        # 历史读取与执行时的过期清理使用同一窗口。
+        today = datetime.now().date()
+        date_list = [today - timedelta(days=i) for i in range(self._HISTORY_DAYS)]
 
         # 获取所有数据，包括签到和登录历史
         all_data = {
             "signin": [],  # 签到数据
             "login": []  # 登录数据
         }
-        sign_dates = set()
-        sites_info = {}  # 记录站点信息
-
-        # 获取站点信息
-        site_indexers = SitesHelper().get_indexers()
-        for site in site_indexers:
-            if not site.get("public"):
-                sites_info[site.get("id")] = site.get("name")
-
-        # 自定义站点
-        custom_sites = self.__custom_sites()
-        for site in custom_sites:
-            sites_info[site.get("id")] = site.get("name")
+        sites_info = self._build_sites_info()
 
         # 获取常规日期格式数据
         for day in date_list:
@@ -752,89 +751,97 @@ class AutoSignInNew(_PluginBase):
                         if isinstance(record, dict):
                             record["date"] = day_str
                             record["day_obj"] = day
+                            if record.get("site_id") is not None:
+                                record["site"] = self._get_site_display_name(record["site_id"], sites_info) or record.get("site")
+                            if not record.get("type") and "登录" not in record.get("status", ""):
+                                if self._status_meta(record.get("status"))["level"] == "success":
+                                    record["status"] += "（历史结果未确认）"
                             # 区分签到和登录数据
-                            if "登录" in record.get("status", ""):
+                            if record.get("type") == "登录" or (
+                                    not record.get("type") and "登录" in record.get("status", "")):
                                 all_data["login"].append(record)
                             else:
                                 all_data["signin"].append(record)
-                    sign_dates.add(day_str)
+                                if record.get("logged_in"):
+                                    all_data["login"].append({**record, "status": "登录成功", "type": "登录", "success": True})
 
             # 获取"签到-yyyy-mm-dd"和"登录-yyyy-mm-dd"格式数据
             signin_history = self.get_data(key="签到-" + day_formatted)
-            if signin_history:
-                if isinstance(signin_history, dict):
-                    # 获取完成签到的站点ID列表
-                    done_sites = signin_history.get("do", [])
-                    retry_sites = signin_history.get("retry", [])
+            if signin_history and isinstance(signin_history, dict):
+                # do 记录的是执行过的站点；results 才保存实际结果。
+                done_sites = signin_history.get("do", [])
+                retry_sites = signin_history.get("retry", [])
 
-                    # 为所有已完成签到的站点创建记录
-                    for site_id in done_sites:
-                        site_id_str = str(site_id)
-                        site_name = sites_info.get(site_id_str) or sites_info.get(site_id) or f"站点ID: {site_id}"
+                # 优先显示真实结果，不把执行记录视为签到凭据。
+                for site_id in done_sites:
+                    site_name = self._get_site_display_name(site_id=site_id, sites_info=sites_info)
+                    if not site_name:
+                        continue
 
-                        # 跳过需要重试的站点
-                        if site_id in retry_sites:
-                            # 为需要重试的站点添加记录
-                            status_text = "需要重试"
-                            all_data["signin"].append({
+                    result = (signin_history.get("results") or {}).get(str(site_id))
+                    if result:
+                        status_text = result.get("message") or "签到结果未确认"
+                        if not result.get("success") and not result.get("logged_in") and self._status_meta(status_text)["level"] == "success":
+                            status_text = f"签到失败：{status_text}"
+                        if result.get("success") and "登录成功" in status_text:
+                            status_text += "（未执行签到）"
+                        if result.get("logged_in"):
+                            all_data["login"].append({
                                 "site": site_name,
-                                "status": status_text,
+                                "status": "登录成功",
                                 "date": day_str,
                                 "day_obj": day,
-                                "site_id": site_id
+                                "site_id": site_id,
                             })
-                        else:
-                            # 为已完成的站点添加记录
-                            status_text = "已签到"
-                            all_data["signin"].append({
-                                "site": site_name,
-                                "status": status_text,
-                                "date": day_str,
-                                "day_obj": day,
-                                "site_id": site_id
-                            })
-
-                    sign_dates.add(day_str)
+                    elif any(record.get("site") == site_name and record.get("date") == day_str
+                             for record in all_data["signin"]):
+                        # 旧 do 只代表执行过，不能覆盖原始明细中的失败结果。
+                        continue
+                    elif site_id in retry_sites:
+                        status_text = "需要重试"
+                    else:
+                        status_text = "签到结果未确认"
+                    all_data["signin"].append({
+                        "site": site_name,
+                        "status": status_text,
+                        "date": day_str,
+                        "day_obj": day,
+                        "site_id": site_id
+                    })
 
             # 获取登录历史数据
             login_history = self.get_data(key="登录-" + day_formatted)
-            if login_history:
-                if isinstance(login_history, dict):
-                    # 获取完成登录的站点ID列表
-                    done_sites = login_history.get("do", [])
-                    retry_sites = login_history.get("retry", [])
+            if login_history and isinstance(login_history, dict):
+                # 获取完成登录的站点ID列表
+                done_sites = login_history.get("do", [])
+                retry_sites = login_history.get("retry", [])
 
-                    # 为所有已完成登录的站点创建记录
-                    for site_id in done_sites:
-                        site_id_str = str(site_id)
-                        site_name = sites_info.get(site_id_str) or sites_info.get(site_id) or f"站点ID: {site_id}"
+                # 为所有已完成登录的站点创建记录
+                for site_id in done_sites:
+                    site_name = self._get_site_display_name(site_id=site_id, sites_info=sites_info)
+                    if not site_name:
+                        continue
 
-                        # 跳过需要重试的站点
-                        if site_id in retry_sites:
-                            # 为需要重试的站点添加记录
-                            status_text = "登录需要重试"
-                            all_data["login"].append({
-                                "site": site_name,
-                                "status": status_text,
-                                "date": day_str,
-                                "day_obj": day,
-                                "site_id": site_id
-                            })
-                        else:
-                            # 为已完成的站点添加记录
-                            status_text = "登录成功"
-                            all_data["login"].append({
-                                "site": site_name,
-                                "status": status_text,
-                                "date": day_str,
-                                "day_obj": day,
-                                "site_id": site_id
-                            })
+                    result = (login_history.get("results") or {}).get(str(site_id))
+                    if result:
+                        status_text = result.get("message") or "登录结果未确认"
+                    elif any(record.get("site") == site_name and record.get("date") == day_str
+                             for record in all_data["login"]):
+                        continue
+                    elif site_id in retry_sites:
+                        status_text = "登录需要重试"
+                    else:
+                        status_text = "登录结果未确认"
+                    all_data["login"].append({
+                        "site": site_name,
+                        "status": status_text,
+                        "date": day_str,
+                        "day_obj": day,
+                        "site_id": site_id
+                    })
 
-                    sign_dates.add(day_str)
-
-        # 如果没有数据，显示提示信息
-        if not all_data["signin"] and not all_data["login"]:
+        # 如果没有数据且没有配置站点，显示提示信息
+        if not all_data["signin"] and not all_data["login"] and not self._sign_sites and not self._login_sites:
             return [{
                 'component': 'VAlert',
                 'props': {
@@ -845,13 +852,6 @@ class AutoSignInNew(_PluginBase):
                     'prepend-icon': 'mdi-information'
                 }
             }]
-
-        # 确保签到数据中至少有所有日期的记录
-        if sign_dates:
-            sign_dates_list = list(sign_dates)
-            sign_dates_list.sort(reverse=True)  # 最新日期优先
-        else:
-            sign_dates_list = [f"{date_list[0].month}月{date_list[0].day}日"]
 
         # 按站点分组并去重数据
         signin_site_data = {}
@@ -891,555 +891,723 @@ class AutoSignInNew(_PluginBase):
                 login_site_data[site_name] = []
             login_site_data[site_name].append(record)
 
-        # 创建签到折叠面板
-        signin_panels = []
-        for site_name, records in signin_site_data.items():
-            # 按日期排序，最新的在前面
-            try:
-                records.sort(key=lambda x: x.get("day_obj", datetime.now().date()), reverse=True)
-            except Exception as e:
-                logger.debug(f"排序失败: {str(e)}")
+        # 补齐已配置但暂无历史记录的站点，详情页能直接看出未记录项。
+        for site_id in self._resolve_site_ids(self._sign_sites):
+            site_name = self._get_site_display_name(site_id=site_id, sites_info=sites_info)
+            if not site_name:
+                continue
+            signin_site_data.setdefault(site_name, [])
+        for site_id in self._resolve_site_ids(self._login_sites):
+            site_name = self._get_site_display_name(site_id=site_id, sites_info=sites_info)
+            if not site_name:
+                continue
+            login_site_data.setdefault(site_name, [])
 
-            # 获取最新的状态作为站点概要
-            latest_status = records[0].get("status", "未知状态")
+        display_dates = date_list[:7]
+        today_label = self._date_label(day=date_list[0])
+        signin_stats = self._calculate_day_stats(site_data=signin_site_data, date_label=today_label)
+        login_stats = self._calculate_day_stats(site_data=login_site_data, date_label=today_label)
 
-            # 确定状态颜色和图标
-            status_color = "teal-lighten-3"
-            status_icon = "mdi-emoticon-happy-outline"
-
-            if "失败" in latest_status or "错误" in latest_status:
-                status_color = "deep-orange-lighten-3"
-                status_icon = "mdi-emoticon-sad-outline"
-            elif "Cookie已失效" in latest_status:
-                status_color = "pink-lighten-3"
-                status_icon = "mdi-cookie-off"
-            elif "重试" in latest_status:
-                status_color = "amber-lighten-3"
-                status_icon = "mdi-emoticon-confused-outline"
-            elif "已签到" in latest_status:
-                status_color = "light-blue-lighten-3"
-                status_icon = "mdi-emoticon-cool-outline"
-            elif "成功" in latest_status:
-                status_color = "teal-lighten-3"
-                status_icon = "mdi-emoticon-happy-outline"
-
-            # 创建每个站点的折叠面板
-            signin_panels.append(
-                self._create_expansion_panel(site_name, records, status_color, status_icon, latest_status))
-
-        # 创建登录折叠面板
-        login_panels = []
-        for site_name, records in login_site_data.items():
-            # 按日期排序，最新的在前面
-            try:
-                records.sort(key=lambda x: x.get("day_obj", datetime.now().date()), reverse=True)
-            except Exception as e:
-                logger.debug(f"排序失败: {str(e)}")
-
-            # 获取最新的状态作为站点概要
-            latest_status = records[0].get("status", "未知状态")
-
-            # 确定状态颜色和图标
-            status_color = "teal-lighten-3"
-            status_icon = "mdi-emoticon-happy-outline"
-
-            if "失败" in latest_status or "错误" in latest_status:
-                status_color = "deep-orange-lighten-3"
-                status_icon = "mdi-emoticon-sad-outline"
-            elif "Cookie已失效" in latest_status:
-                status_color = "pink-lighten-3"
-                status_icon = "mdi-cookie-off"
-            elif "重试" in latest_status:
-                status_color = "amber-lighten-3"
-                status_icon = "mdi-emoticon-confused-outline"
-            elif "已签到" in latest_status:
-                status_color = "light-blue-lighten-3"
-                status_icon = "mdi-emoticon-cool-outline"
-            elif "成功" in latest_status:
-                status_color = "teal-lighten-3"
-                status_icon = "mdi-emoticon-happy-outline"
-
-            # 创建每个站点的折叠面板
-            login_panels.append(
-                self._create_expansion_panel(site_name, records, status_color, status_icon, latest_status))
-
-        # 添加样式
+        # 添加紧凑状态矩阵样式
         return [
             {
                 'component': 'style',
                 'text': """
-                .v-expansion-panel-title {
-                    min-height: 48px !important;
-                    padding: 0 16px !important;
+                .autosignin-page {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 12px;
                 }
-                .v-expansion-panel-text__wrapper {
-                    padding: 0 !important;
+                .autosignin-summary {
+                    display: grid;
+                    grid-template-columns: repeat(4, minmax(0, 1fr));
+                    gap: 8px;
                 }
-                .v-expansion-panel {
-
-                    margin-bottom: 10px !important;
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-                    border-radius: 16px !important;
-                    overflow: hidden !important;
-                    border: 1px solid rgba(0,0,0,0.03);
-                    transition: all 0.3s ease;
+                .autosignin-stat {
+                    min-width: 0;
+                    padding: 10px 12px;
                 }
-                .v-expansion-panel:hover {
-
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.08) !important;
-                    transform: translateY(-2px);
-                }
-                .site-item {
-                    border-radius: 10px;
-                    transition: all 0.3s ease;
-                    margin: 5px 0;
-
-                }
-                .site-item:hover {
-
-                    transform: scale(1.01);
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-                }
-                .text-teal-lighten-3 {
-                    color: #80CBC4 !important;
-                }
-                .text-deep-orange-lighten-3 {
-                    color: #FFAB91 !important;
-                }
-                .text-pink-lighten-3 {
-                    color: #F8BBD0 !important;
-                }
-                .text-amber-lighten-3 {
-                    color: #FFE082 !important;
-                }
-                .text-light-blue-lighten-3 {
-                    color: #81D4FA !important;
-                }
-                .status-icon {
-                    width: 24px;
-                    height: 24px;
-                    line-height: 24px;
-                    text-align: center;
-                    border-radius: 50%;
-                    margin-right: 8px;
-                }
-                .signin-card, .login-card {
-                    transition: all 0.3s ease;
-                    border-radius: 20px !important;
-                    overflow: hidden;
-                    box-shadow: 0 4px 15px rgba(0,0,0,0.03) !important;
-                    border: 1px solid rgba(0,0,0,0.03);
-                }
-                .signin-card:hover, .login-card:hover {
-                    transform: translateY(-3px);
-                    box-shadow: 0 6px 20px rgba(0,0,0,0.05) !important;
-                }
-                .v-card-title.gradient-title {
-                    margin-bottom: 0 !important;
-                    border-bottom: 1px solid rgba(0,0,0,0.03);
-                }
-                .signin-card .v-card-title.gradient-title {
-                    background: linear-gradient(135deg, rgba(128, 203, 196, 0.15) 0%, rgba(165, 214, 167, 0.15) 100%);
-                }
-                .login-card .v-card-title.gradient-title {
-                    background: linear-gradient(135deg, rgba(129, 212, 250, 0.15) 0%, rgba(159, 168, 218, 0.15) 100%);
-                }
-                .date-chip {
-                    margin: 2px !important;
-                    border-radius: 14px !important;
-                    font-size: 0.75rem !important;
-                }
-                .status-chip {
-                    padding: 0 8px;
-                    border-radius: 14px !important;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.03);
-                }
-                .site-icon {
-                    background: linear-gradient(45deg, #80CBC4, #81D4FA);
-                    color: white !important;
-                    border-radius: 12px;
-                    width: 32px;
-                    height: 32px;
+                .autosignin-stat__head {
                     display: flex;
                     align-items: center;
-                    justify-content: center;
-                    margin-right: 10px;
-                    font-weight: bold;
-                    font-size: 15px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.06);
-                }
-                .page-title {
-                    font-size: 1.5rem;
+                    gap: 6px;
+                    min-width: 0;
+                    color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
+                    font-size: .75rem;
                     font-weight: 600;
-                    background: -webkit-linear-gradient(45deg, #80CBC4, #81D4FA);
-                    -webkit-background-clip: text;
-                    -webkit-text-fill-color: transparent;
+                    line-height: 1.25;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+                .autosignin-stat__head .v-icon {
+                    color: rgb(var(--app-card-accent-rgb));
+                }
+                .autosignin-stat__value {
+                    margin-top: 8px;
+                    font-size: 1.25rem;
+                    font-weight: 700;
+                    line-height: 1;
+                    letter-spacing: 0;
+                }
+                .autosignin-stat__meta {
+                    margin-top: 4px;
+                    color: rgba(var(--v-theme-on-surface), .56);
+                    font-size: .72rem;
+                    line-height: 1.25;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+                .autosignin-section {
+                    min-width: 0;
+                }
+                .autosignin-section-head {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    min-height: 30px;
+                    margin-bottom: 6px;
+                }
+                .autosignin-section-title {
+                    font-size: .95rem;
+                    font-weight: 700;
+                    letter-spacing: 0;
+                }
+                .autosignin-table-wrap {
+                    overflow-x: auto;
+                    border: 1px solid rgba(var(--v-theme-on-surface), .08);
+                    border-radius: 8px;
+                }
+                .autosignin-table {
+                    min-width: 620px;
+                }
+                html[data-theme="transparent"] .autosignin-table-wrap,
+                .v-theme--transparent .autosignin-table-wrap {
+                    backdrop-filter: blur(var(--transparent-blur, 10px));
+                    background-color: rgba(var(--v-theme-surface), 0) !important;
+                }
+                html[data-theme="transparent"] .autosignin-table,
+                html[data-theme="transparent"] .autosignin-table .v-table__wrapper,
+                html[data-theme="transparent"] .autosignin-table table,
+                html[data-theme="transparent"] .autosignin-table tbody tr,
+                .v-theme--transparent .autosignin-table,
+                .v-theme--transparent .autosignin-table .v-table__wrapper,
+                .v-theme--transparent .autosignin-table table,
+                .v-theme--transparent .autosignin-table tbody tr {
+                    background-color: transparent !important;
+                }
+                .autosignin-table th {
+                    height: 34px !important;
+                    padding: 0 8px !important;
+                    color: rgba(var(--v-theme-on-surface), .62);
+                    font-size: .75rem;
+                    font-weight: 600 !important;
+                    white-space: nowrap;
+                }
+                .autosignin-table td {
+                    height: 38px !important;
+                    padding: 0 8px !important;
+                    vertical-align: middle;
+                }
+                .autosignin-table tbody tr:last-child td {
+                    border-bottom: 0 !important;
+                }
+                .autosignin-site-name {
+                    max-width: 160px;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                    font-weight: 600;
+                    line-height: 1.2;
+                }
+                .autosignin-site-meta {
+                    margin-top: 2px;
+                    color: rgba(var(--v-theme-on-surface), .52);
+                    font-size: .68rem;
+                    line-height: 1.1;
+                }
+                .autosignin-status-cell {
+                    min-width: 92px;
+                }
+                .autosignin-dot-cell {
+                    width: 40px;
+                    text-align: center;
+                }
+                .autosignin-dot {
+                    width: 22px;
+                    height: 22px;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    border-radius: 999px;
+                    border: 1px solid transparent;
+                    font-weight: 700;
+                }
+                .autosignin-dot .v-icon {
+                    opacity: 1;
+                }
+                .autosignin-dot--success {
+                    color: rgb(var(--v-theme-success));
+                    background: rgba(var(--v-theme-success), .24);
+                    border-color: rgba(var(--v-theme-success), .38);
+                }
+                .autosignin-dot--warning {
+                    color: rgb(var(--v-theme-warning));
+                    background: rgba(var(--v-theme-warning), .30);
+                    border-color: rgba(var(--v-theme-warning), .48);
+                }
+                .autosignin-dot--error {
+                    color: rgb(var(--v-theme-error));
+                    background: rgba(var(--v-theme-error), .26);
+                    border-color: rgba(var(--v-theme-error), .42);
+                }
+                .autosignin-dot--none {
+                    color: rgba(var(--v-theme-on-surface), .68);
+                    background: rgba(var(--v-theme-on-surface), .14);
+                    border-color: rgba(var(--v-theme-on-surface), .22);
+                }
+                @media (max-width: 720px) {
+                    .autosignin-page {
+                        gap: 10px;
+                    }
+                    .autosignin-summary {
+                        grid-template-columns: repeat(2, minmax(0, 1fr));
+                    }
+                    .autosignin-stat {
+                        padding: 8px 10px;
+                    }
+                    .autosignin-stat__value {
+                        font-size: 1.08rem;
+                    }
+                    .autosignin-table {
+                        min-width: 560px;
+                    }
+                    .autosignin-table th,
+                    .autosignin-table td {
+                        padding-left: 6px !important;
+                        padding-right: 6px !important;
+                    }
+                    .autosignin-site-name {
+                        max-width: 126px;
+                    }
+                    .autosignin-dot-cell {
+                        width: 34px;
+                    }
                 }
                 """
             },
             {
-                'component': 'VRow',
+                'component': 'div',
                 'props': {
-                    'class': 'mt-2'
+                    'class': 'autosignin-page'
                 },
                 'content': [
-                    {
-                        'component': 'VCol',
-                        'props': {
-                            'cols': 12,
-                            'class': 'pb-0'
-                        },
-                        'content': [
-                            {
-                                'component': 'div',
-                                'props': {
-                                    'class': 'd-flex align-center mb-4'
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VIcon',
-                                        'props': {
-                                            'color': 'light-blue-lighten-3',
-                                            'class': 'mr-2',
-                                            'size': 'large',
-                                            'icon': 'mdi-cat'
-                                        }
-                                    },
-                                    {
-                                        'component': 'h2',
-                                        'props': {
-                                            'class': 'page-title m-0'
-                                        },
-                                        'text': '站点签到小助手'
-                                    },
-                                    {
-                                        'component': 'VSpacer'
-                                    },
-                                    {
-                                        'component': 'VChip',
-                                        'props': {
-                                            'color': 'light-blue-lighten-5',
-                                            'size': 'small',
-                                            'variant': 'elevated',
-                                            'class': 'ml-2',
-                                            'prepend-icon': 'mdi-paw'
-                                        },
-                                        'text': f'显示 {len(sign_dates_list)} 天数据'
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                ]
-            },
-            {
-                'component': 'VRow',
-                'content': [
-                    # 左侧 - 签到数据
-                    {
-                        'component': 'VCol',
-                        'props': {
-                            'cols': 12,
-                            'md': 6
-                        },
-                        'content': [
-                            {
-                                'component': 'VCard',
-                                'props': {
-                                    'variant': 'flat',
-                                    'class': 'mb-4 signin-card'
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VCardTitle',
-                                        'props': {
-                                            'class': 'gradient-title d-flex align-center pa-4'
-                                        },
-                                        'content': [
-                                            {
-                                                'component': 'VIcon',
-                                                'props': {
-                                                    'class': 'mr-2',
-                                                    'color': 'teal-lighten-3',
-                                                    'size': 'small',
-                                                    'icon': 'mdi-duck'
-                                                }
-                                            },
-                                            {
-                                                'component': 'span',
-                                                'props': {
-                                                    'class': 'font-weight-medium'
-                                                },
-                                                'text': '签到打卡记录'
-                                            },
-                                            {
-                                                'component': 'VSpacer'
-                                            },
-                                            {
-                                                'component': 'VChip',
-                                                'props': {
-                                                    'color': 'teal-lighten-5',
-                                                    'size': 'x-small',
-                                                    'variant': 'elevated',
-                                                    'class': 'ml-2',
-                                                    'prepend-icon': 'mdi-rabbit'
-                                                },
-                                                'text': f'{len(signin_site_data)} 个站点'
-                                            }
-                                        ]
-                                    },
-                                    {
-                                        'component': 'VCardText',
-                                        'props': {
-                                            'class': 'pa-3'
-                                        },
-                                        'content': [
-                                            {
-                                                'component': 'VExpansionPanels',
-                                                'props': {
-                                                    'variant': 'accordion',
-                                                    'class': 'mt-2'
-                                                },
-                                                'content': signin_panels or [{
-                                                    'component': 'VAlert',
-                                                    'props': {
-                                                        'type': 'info',
-                                                        'text': '暂无签到数据',
-                                                        'variant': 'tonal',
-                                                        'class': 'mt-2',
-                                                        'density': 'compact',
-                                                        'prepend-icon': 'mdi-penguin'
-                                                    }
-                                                }]
-                                            }
-                                        ]
-                                    }
-                                ]
-                            }
-                        ]
-                    },
-                    # 右侧 - 登录数据
-                    {
-                        'component': 'VCol',
-                        'props': {
-                            'cols': 12,
-                            'md': 6
-                        },
-                        'content': [
-                            {
-                                'component': 'VCard',
-                                'props': {
-                                    'variant': 'flat',
-                                    'class': 'mb-4 login-card'
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VCardTitle',
-                                        'props': {
-                                            'class': 'gradient-title d-flex align-center pa-4'
-                                        },
-                                        'content': [
-                                            {
-                                                'component': 'VIcon',
-                                                'props': {
-                                                    'class': 'mr-2',
-                                                    'color': 'light-blue-accent-3',
-                                                    'size': 'small',
-                                                    'icon': 'mdi-dog'
-                                                }
-                                            },
-                                            {
-                                                'component': 'span',
-                                                'props': {
-                                                    'class': 'font-weight-medium'
-                                                },
-                                                'text': '登录记录'
-                                            },
-                                            {
-                                                'component': 'VSpacer'
-                                            },
-                                            {
-                                                'component': 'VChip',
-                                                'props': {
-                                                    'color': 'light-blue-lighten-4',
-                                                    'size': 'x-small',
-                                                    'variant': 'elevated',
-                                                    'class': 'ml-2',
-                                                    'prepend-icon': 'mdi-panda'
-                                                },
-                                                'text': f'{len(login_site_data)} 个站点'
-                                            }
-                                        ]
-                                    },
-                                    {
-                                        'component': 'VCardText',
-                                        'props': {
-                                            'class': 'pa-3'
-                                        },
-                                        'content': [
-                                            {
-                                                'component': 'VExpansionPanels',
-                                                'props': {
-                                                    'variant': 'accordion',
-                                                    'class': 'mt-2'
-                                                },
-                                                'content': login_panels or [{
-                                                    'component': 'VAlert',
-                                                    'props': {
-                                                        'type': 'info',
-                                                        'text': '暂无登录数据',
-                                                        'variant': 'tonal',
-                                                        'class': 'mt-2',
-                                                        'density': 'compact',
-                                                        'prepend-icon': 'mdi-cat'
-                                                    }
-                                                }]
-                                            }
-                                        ]
-                                    }
-                                ]
-                            }
-                        ]
-                    }
+                    self._build_summary(signin_stats=signin_stats, login_stats=login_stats, days=len(date_list)),
+                    self._build_status_section(
+                        title="签到状态",
+                        icon="mdi-calendar-check",
+                        site_data=signin_site_data,
+                        display_dates=display_dates,
+                        empty_text="暂无签到数据"
+                    ),
+                    self._build_status_section(
+                        title="登录状态",
+                        icon="mdi-login-variant",
+                        site_data=login_site_data,
+                        display_dates=display_dates,
+                        empty_text="暂无登录数据"
+                    )
                 ]
             }
         ]
 
     @staticmethod
-    def _create_expansion_panel(site_name, records, status_color, status_icon, latest_status):
-        """创建站点折叠面板"""
-        # 生成站点图标（使用站点名的首字母）
-        site_initial = site_name[0].upper() if site_name else "?"
+    def _add_site_info(sites_info: dict, site_id: Any, site_name: Any) -> None:
+        """
+        记录站点ID到名称的映射，兼容历史记录中ID类型不一致的情况。
+        """
+        if site_id is None or not site_name:
+            return
+        sites_info[site_id] = site_name
+        sites_info[str(site_id)] = site_name
 
-        # 生成记录列表
-        records_list = []
-        for record in records:
-            date_str = record.get("date", "")
-            status_text = record.get("status", "未知状态")
+    def _build_sites_info(self) -> dict:
+        """
+        汇总系统站点、索引器站点和自定义站点名称，供详情页历史记录反查。
+        """
+        sites_info = {}
+        for site in SitesHelper().get_indexers():
+            if not site.get("public"):
+                self._add_site_info(
+                    sites_info=sites_info,
+                    site_id=site.get("id"),
+                    site_name=site.get("name")
+                )
+        for site in SiteOper().list_order_by_pri():
+            self._add_site_info(
+                sites_info=sites_info,
+                site_id=getattr(site, "id", None),
+                site_name=getattr(site, "name", None)
+            )
+        for site in self.__custom_sites():
+            self._add_site_info(
+                sites_info=sites_info,
+                site_id=site.get("id"),
+                site_name=site.get("name")
+            )
+        return sites_info
 
-            # 确定状态颜色和图标
-            record_color = "success"
-            record_icon = "mdi-check-circle"
+    @staticmethod
+    def _get_site_display_name(site_id, sites_info: dict) -> Optional[str]:
+        """
+        根据站点ID获取详情页中展示的站点名称，查不到时返回空值便于跳过。
+        """
+        site_id_str = str(site_id)
+        name = sites_info.get(site_id_str) or sites_info.get(site_id)
+        same_name_ids = {str(key) for key, value in sites_info.items() if value == name}
+        return f"{name}（{site_id_str}）" if name and len(same_name_ids) > 1 else name
 
-            if "失败" in status_text or "错误" in status_text:
-                record_color = "error"
-                record_icon = "mdi-alert-circle"
-            elif "Cookie已失效" in status_text:
-                record_color = "error"
-                record_icon = "mdi-cookie-off"
-            elif "重试" in status_text:
-                record_color = "warning"
-                record_icon = "mdi-refresh"
-            elif "已签到" in status_text:
-                record_color = "info"
-                record_icon = "mdi-check"
-            elif "登录成功" in status_text:
-                record_color = "success"
-                record_icon = "mdi-login-variant"
+    @staticmethod
+    def _status_meta(status_text: str) -> dict:
+        """
+        将签到或登录状态文本转换为页面展示需要的颜色、图标和排序权重。
+        """
+        status_text = str(status_text or "").strip()
+        if "Cookie已失效" in status_text or "失效" in status_text:
+            return {
+                "level": "error",
+                "color": "error",
+                "icon": "mdi-cookie-off",
+                "label": status_text or "Cookie失效",
+                "sort": 0
+            }
+        if any(word in status_text for word in ("失败", "错误", "未成功", "未签到", "未簽到")):
+            return {
+                "level": "error",
+                "color": "error",
+                "icon": "mdi-alert-circle",
+                "label": status_text or "失败",
+                "sort": 0
+            }
+        if any(word in status_text for word in ("重试", "未确认", "未执行签到", "仿真签到成功")):
+            return {
+                "level": "warning",
+                "color": "warning",
+                "icon": "mdi-refresh",
+                "label": status_text or "需要重试",
+                "sort": 1
+            }
+        if "成功" in status_text or "已签到" in status_text:
+            return {
+                "level": "success",
+                "color": "success",
+                "icon": "mdi-check-circle",
+                "label": status_text or "成功",
+                "sort": 3
+            }
+        if status_text:
+            return {
+                "level": "none",
+                "color": "grey",
+                "icon": "mdi-help-circle-outline",
+                "label": status_text,
+                "sort": 2
+            }
+        return {
+            "level": "none",
+            "color": "grey",
+            "icon": "mdi-minus-circle-outline",
+            "label": "未记录",
+            "sort": 2
+        }
 
-            # 创建记录项
-            records_list.append({
-                'component': 'VListItem',
-                'props': {
-                    'class': 'site-item px-2 py-1'
+    @staticmethod
+    def _latest_record(records: list, date_label: str = None) -> dict:
+        """
+        获取指定日期或整个记录列表中的最新一条记录。
+        """
+        filtered_records = records
+        if date_label:
+            filtered_records = [record for record in records if record.get("date") == date_label]
+        if not filtered_records:
+            return {}
+        try:
+            return sorted(
+                filtered_records,
+                key=lambda item: item.get("day_obj", datetime.min.date()),
+                reverse=True
+            )[0]
+        except Exception as e:
+            logger.debug(f"获取最新记录失败: {str(e)}")
+            return filtered_records[0]
+
+    @staticmethod
+    def _date_label(day) -> str:
+        """
+        将日期对象格式化为历史记录使用的月日标签。
+        """
+        return f"{day.month}月{day.day}日"
+
+    @classmethod
+    def _calculate_day_stats(cls, site_data: dict, date_label: str) -> dict:
+        """
+        统计指定日期下各站点的成功、异常和未记录数量。
+        """
+        stats = {
+            "total": len(site_data),
+            "recorded": 0,
+            "success": 0,
+            "warning": 0,
+            "error": 0,
+            "none": 0
+        }
+        for records in site_data.values():
+            record = cls._latest_record(records=records, date_label=date_label)
+            if not record:
+                stats["none"] += 1
+                continue
+            stats["recorded"] += 1
+            level = cls._status_meta(record.get("status", "")).get("level")
+            if level in stats:
+                stats[level] += 1
+        return stats
+
+    @staticmethod
+    def _build_stat_item(label: str, value: str, meta: str, color: str, icon: str) -> dict:
+        """
+        构建顶部紧凑统计块。
+        """
+        return {
+            'component': 'div',
+            'props': {
+                'class': 'autosignin-stat app-card-shell app-card-colorful',
+                'style': f'--app-card-accent-rgb: var(--v-theme-{color});'
+            },
+            'content': [
+                {
+                    'component': 'div',
+                    'props': {
+                        'class': 'autosignin-stat__head'
+                    },
+                    'content': [
+                        {
+                            'component': 'VIcon',
+                            'props': {
+                                'size': 'x-small',
+                                'color': color
+                            },
+                            'text': icon
+                        },
+                        {
+                            'component': 'span',
+                            'text': label
+                        }
+                    ]
                 },
+                {
+                    'component': 'div',
+                    'props': {
+                        'class': f'autosignin-stat__value text-{color}'
+                    },
+                    'text': value
+                },
+                {
+                    'component': 'div',
+                    'props': {
+                        'class': 'autosignin-stat__meta'
+                    },
+                    'text': meta
+                }
+            ]
+        }
+
+    @classmethod
+    def _build_summary(cls, signin_stats: dict, login_stats: dict, days: int) -> dict:
+        """
+        构建详情页顶部的签到和登录概要。
+        """
+        signin_total = signin_stats.get("total") or 0
+        login_total = login_stats.get("total") or 0
+        signin_problem_count = (signin_stats.get("error") or 0) + (signin_stats.get("warning") or 0)
+        signin_missing_count = signin_stats.get("none") or 0
+        signin_color = "info"
+        if signin_total:
+            signin_color = "success" if not signin_problem_count and not signin_missing_count else "warning"
+        if signin_total and signin_stats.get("error"):
+            signin_color = "error"
+
+        return {
+            'component': 'div',
+            'props': {
+                'class': 'autosignin-summary'
+            },
+            'content': [
+                cls._build_stat_item(
+                    label="今日签到",
+                    value=f"{signin_stats.get('success') or 0}/{signin_total}",
+                    meta=f"失败 {signin_stats.get('error') or 0} · 未确认 {signin_stats.get('warning') or 0} · 未记录 {signin_missing_count}",
+                    color=signin_color,
+                    icon="mdi-calendar-check"
+                ),
+                cls._build_stat_item(
+                    label="签到未完成",
+                    value=str(signin_problem_count),
+                    meta=f"失败 {signin_stats.get('error') or 0} · 未确认 {signin_stats.get('warning') or 0}",
+                    color="error" if signin_stats.get("error") else "warning",
+                    icon="mdi-alert-circle-outline"
+                ),
+                cls._build_stat_item(
+                    label="今日登录",
+                    value=f"{login_stats.get('success') or 0}/{login_total}",
+                    meta=f"异常 {(login_stats.get('error') or 0) + (login_stats.get('warning') or 0)} · 未记录 {login_stats.get('none') or 0}",
+                    color="success" if login_total and not login_stats.get("error") and not login_stats.get("warning") else "info",
+                    icon="mdi-login-variant"
+                ),
+                cls._build_stat_item(
+                    label="历史范围",
+                    value=f"{days}天",
+                    meta="矩阵显示最近7天",
+                    color="info",
+                    icon="mdi-history"
+                )
+            ]
+        }
+
+    @classmethod
+    def _build_status_section(cls, title: str, icon: str, site_data: dict, display_dates: list, empty_text: str) -> dict:
+        """
+        构建签到或登录状态区块，使用按站点排列的紧凑矩阵展示最近状态。
+        """
+        return {
+            'component': 'div',
+            'props': {
+                'class': 'autosignin-section'
+            },
+            'content': [
+                {
+                    'component': 'div',
+                    'props': {
+                        'class': 'autosignin-section-head'
+                    },
+                    'content': [
+                        {
+                            'component': 'VIcon',
+                            'props': {
+                                'size': 'small',
+                                'color': 'primary'
+                            },
+                            'text': icon
+                        },
+                        {
+                            'component': 'span',
+                            'props': {
+                                'class': 'autosignin-section-title'
+                            },
+                            'text': title
+                        },
+                        {
+                            'component': 'VSpacer'
+                        },
+                        {
+                            'component': 'VChip',
+                            'props': {
+                                'size': 'x-small',
+                                'variant': 'tonal',
+                                'color': 'primary'
+                            },
+                            'text': f"{len(site_data)} 个站点"
+                        }
+                    ]
+                },
+                cls._build_status_table(
+                    site_data=site_data,
+                    display_dates=display_dates,
+                    empty_text=empty_text
+                )
+            ]
+        }
+
+    @classmethod
+    def _build_status_table(cls, site_data: dict, display_dates: list, empty_text: str) -> dict:
+        """
+        构建按站点和日期交叉展示的状态表格。
+        """
+        if not site_data:
+            return {
+                'component': 'VAlert',
+                'props': {
+                    'type': 'info',
+                    'text': empty_text,
+                    'variant': 'tonal',
+                    'density': 'compact',
+                    'prepend-icon': 'mdi-information'
+                }
+            }
+
+        table_headers = [
+            {
+                'component': 'th',
+                'props': {
+                    'class': 'text-start'
+                },
+                'text': '站点'
+            },
+            {
+                'component': 'th',
+                'props': {
+                    'class': 'text-start'
+                },
+                'text': '今日'
+            }
+        ]
+        for day in display_dates:
+            table_headers.append({
+                'component': 'th',
+                'props': {
+                    'class': 'text-center'
+                },
+                'text': f"{day.month}/{day.day}"
+            })
+
+        sorted_sites = sorted(
+            site_data.items(),
+            key=lambda item: cls._site_sort_key(site_name=item[0], records=item[1], display_dates=display_dates)
+        )
+        table_rows = []
+        for site_name, records in sorted_sites:
+            table_rows.append(cls._build_status_row(site_name=site_name, records=records, display_dates=display_dates))
+
+        return {
+            'component': 'div',
+            'props': {
+                'class': 'autosignin-table-wrap'
+            },
+            'content': [
+                {
+                    'component': 'VTable',
+                    'props': {
+                        'hover': True,
+                        'density': 'compact',
+                        'class': 'autosignin-table'
+                    },
+                    'content': [
+                        {
+                            'component': 'thead',
+                            'content': [
+                                {
+                                    'component': 'tr',
+                                    'content': table_headers
+                                }
+                            ]
+                        },
+                        {
+                            'component': 'tbody',
+                            'content': table_rows
+                        }
+                    ]
+                }
+            ]
+        }
+
+    @classmethod
+    def _site_sort_key(cls, site_name: str, records: list, display_dates: list) -> tuple:
+        """
+        生成站点行排序键，让今日异常和未记录站点优先展示。
+        """
+        today_label = cls._date_label(day=display_dates[0]) if display_dates else ""
+        today_record = cls._latest_record(records=records, date_label=today_label)
+        latest_record = cls._latest_record(records=records)
+        status_meta = cls._status_meta(today_record.get("status", "") if today_record else "")
+        latest_day = latest_record.get("day_obj", datetime.min.date()) if latest_record else datetime.min.date()
+        return status_meta.get("sort", 2), -latest_day.toordinal(), site_name
+
+    @classmethod
+    def _build_status_row(cls, site_name: str, records: list, display_dates: list) -> dict:
+        """
+        构建单个站点在状态矩阵中的一行。
+        """
+        today_label = cls._date_label(day=display_dates[0]) if display_dates else ""
+        today_record = cls._latest_record(records=records, date_label=today_label)
+        today_status = today_record.get("status", "") if today_record else ""
+        today_meta = cls._status_meta(today_status)
+        row_cells = [
+            {
+                'component': 'td',
                 'content': [
                     {
                         'component': 'div',
                         'props': {
-                            'class': 'd-flex align-center w-100'
+                            'class': 'autosignin-site-name',
+                            'title': site_name
                         },
-                        'content': [
-                            {
-                                'component': 'VChip',
-                                'props': {
-                                    'color': 'grey-lighten-3',
-                                    'size': 'x-small',
-                                    'class': 'date-chip mr-2',
-                                    'variant': 'flat',
-                                    'prepend-icon': 'mdi-flower-tulip'
-                                },
-                                'text': date_str
-                            },
-                            {
-                                'component': 'VSpacer'
-                            },
-                            {
-                                'component': 'VChip',
-                                'props': {
-                                    'color': record_color,
-                                    'size': 'x-small',
-                                    'class': 'ml-2 status-chip',
-                                    'variant': 'flat',
-                                    'prepend-icon': record_icon
-                                },
-                                'text': status_text
-                            }
-                        ]
-                    }
-                ]
-            })
-
-        # 创建折叠面板
-        return {
-            'component': 'VExpansionPanel',
-            'content': [
-                {
-                    'component': 'VExpansionPanelTitle',
-                    'content': [{
+                        'text': site_name
+                    },
+                    {
                         'component': 'div',
                         'props': {
-                            'class': 'd-flex align-center'
+                            'class': 'autosignin-site-meta'
                         },
-                        'content': [
-                            {
-                                'component': 'div',
-                                'props': {
-                                    'class': 'site-icon'
-                                },
-                                'text': site_initial
-                            },
-                            {
-                                'component': 'span',
-                                'props': {
-                                    'class': 'font-weight-medium'
-                                },
-                                'text': site_name
-                            },
-                            {
-                                'component': 'VSpacer'
-                            },
-                            {
-                                'component': 'VIcon',
-                                'props': {
-                                    'color': status_color,
-                                    'class': 'mr-2',
-                                    'size': 'small'
-                                },
-                                'text': status_icon
-                            },
-                            {
-                                'component': 'span',
-                                'props': {
-                                    'class': f'text-{status_color} text-caption'
-                                },
-                                'text': latest_status
-                            }
-                        ]
-                    }]
+                        'text': f"{len(records)} 条记录" if records else "暂无记录"
+                    }
+                ]
+            },
+            {
+                'component': 'td',
+                'props': {
+                    'class': 'autosignin-status-cell'
                 },
+                'content': [
+                    {
+                        'component': 'VChip',
+                        'props': {
+                            'size': 'x-small',
+                            'variant': 'tonal',
+                            'color': today_meta.get("color"),
+                            'prepend-icon': today_meta.get("icon")
+                        },
+                        'text': today_meta.get("label")
+                    }
+                ]
+            }
+        ]
+        for day in display_dates:
+            date_label = cls._date_label(day=day)
+            record = cls._latest_record(records=records, date_label=date_label)
+            row_cells.append({
+                'component': 'td',
+                'props': {
+                    'class': 'autosignin-dot-cell'
+                },
+                'content': [
+                    cls._build_status_dot(record=record, date_label=date_label)
+                ]
+            })
+        return {
+            'component': 'tr',
+            'content': row_cells
+        }
+
+    @classmethod
+    def _build_status_dot(cls, record: dict, date_label: str) -> dict:
+        """
+        构建矩阵中单日状态的图标点。
+        """
+        status_text = record.get("status", "") if record else ""
+        status_meta = cls._status_meta(status_text)
+        return {
+            'component': 'span',
+            'props': {
+                'class': f"autosignin-dot autosignin-dot--{status_meta.get('level')}",
+                'title': f"{date_label} {status_meta.get('label')}"
+            },
+            'content': [
                 {
-                    'component': 'VExpansionPanelText',
-                    'content': [
-                        {
-                            'component': 'VList',
-                            'props': {
-                                'lines': 'one',
-                                'density': 'compact'
-                            },
-                            'content': records_list
-                        }
-                    ]
+                    'component': 'VIcon',
+                    'props': {
+                        'size': 'x-small'
+                    },
+                    'text': status_meta.get("icon")
                 }
             ]
         }
@@ -1457,7 +1625,8 @@ class AutoSignInNew(_PluginBase):
         today = datetime.today()
         if self._start_time and self._end_time:
             if int(datetime.today().hour) < self._start_time or int(datetime.today().hour) > self._end_time:
-                logger.error(f"当前时间 {int(datetime.today().hour)} 不在 {self._start_time}-{self._end_time} 范围内，暂不执行任务")
+                logger.error(
+                    f"当前时间 {int(datetime.today().hour)} 不在 {self._start_time}-{self._end_time} 范围内，暂不执行任务")
                 return
         if event:
             logger.info("收到命令，开始站点签到 ...")
@@ -1470,28 +1639,55 @@ class AutoSignInNew(_PluginBase):
         if self._login_sites:
             self.__do(today=today, type_str="登录", do_sites=self._login_sites, event=event)
 
+    def _clean_history(self, today: datetime):
+        """清除14天窗口外的签到、登录和月日明细，兼顾停跑后的过期记录。"""
+        first_day = today.date() - timedelta(days=self._HISTORY_DAYS - 1)
+        retained_days = {
+            self._date_label(today.date() - timedelta(days=offset))
+            for offset in range(self._HISTORY_DAYS)
+        }
+        for data in self.get_data() or []:
+            key = data.key
+            if re.fullmatch(r"(?:签到|登录)-\d{4}-\d{2}-\d{2}", key):
+                try:
+                    day = datetime.strptime(key.split("-", 1)[1], "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if day < first_day:
+                    self.del_data(key=key)
+            elif re.fullmatch(r"\d{1,2}月\d{1,2}日", key) and key not in retained_days:
+                # 旧明细键不含年份，按窗口内的月日保留，避免跨年误删。
+                self.del_data(key=key)
+            elif re.fullmatch(r"freq-\d{4}-\d{2}-\d{2}", key):
+                # 通知计数只按天保留，清理窗口外的记录避免长期累积。
+                try:
+                    day = datetime.strptime(key.split("-", 1)[1], "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+                if day < first_day:
+                    self.del_data(key=key)
+
     def __do(self, today: datetime, type_str: str, do_sites: list, event: Event = None):
-        """
-        签到逻辑
-        """
-        yesterday = today - timedelta(days=1)
-        yesterday_str = yesterday.strftime('%Y-%m-%d')
-        # 删除昨天历史
-        self.del_data(key=f"freq-{yesterday_str}")
-        self.del_data(key=type_str + "-" + yesterday_str)
-        self.del_data(key=f"{yesterday.month}月{yesterday.day}日")
+        """清理过期历史后执行签到或登录，保留当天去重及失败重试语义。"""
+        self._clean_history(today)
 
         # 查看今天有没有签到|登录历史
         today = today.strftime('%Y-%m-%d')
         today_history = self.get_data(key=type_str + "-" + today)
+        results = (today_history or {}).get("results") or {}
 
         # 查询所有站点
-        all_sites = [site for site in SitesHelper().get_indexers() if not site.get("public")] + self.__custom_sites()
+        builtin_sites = [site for site in SitesHelper().get_indexers() if not site.get("public")]
+        builtin_site_ids = {site.get("id") for site in builtin_sites}
+        all_sites = builtin_sites + self.__custom_sites()
         # 过滤掉没有选中的站点
-        if do_sites:
+        if do_sites and self._ALL_SITES not in do_sites:
             do_sites = [site for site in all_sites if site.get("id") in do_sites]
         else:
             do_sites = all_sites
+
+        # 记录本轮真实站点ID，历史、重试与通知不能使用全选标记。
+        selected_site_ids = [site.get("id") for site in do_sites]
 
         # 今日没数据
         if not today_history or self._clean:
@@ -1507,7 +1703,9 @@ class AutoSignInNew(_PluginBase):
 
             # 今日未签|登录站点
             no_sites = [site for site in do_sites if
-                        site.get("id") not in already_sites or site.get("id") in retry_sites]
+                        site.get("id") not in already_sites or site.get("id") in retry_sites
+                        or not (results.get(str(site.get("id")), {}).get("success")
+                                or results.get(str(site.get("id")), {}).get("logged_in"))]
 
             if not no_sites:
                 logger.info(f"今日 {today} 已{type_str}，无重新{type_str}站点，本次任务结束")
@@ -1515,7 +1713,7 @@ class AutoSignInNew(_PluginBase):
 
             # 任务站点 = 需要重试+今日未do
             do_sites = no_sites
-            logger.info(f"今日 {today} 已{type_str}，开始重试命中关键词站点")
+            logger.info(f"今日 {today} 已执行{type_str}，重试未确认登录或命中关键词的站点")
 
         if not do_sites:
             logger.info(f"没有需要{type_str}的站点")
@@ -1538,16 +1736,24 @@ class AutoSignInNew(_PluginBase):
             if today_data:
                 if not isinstance(today_data, list):
                     today_data = [today_data]
-                for s in status:
+                for site, s in zip(do_sites, status):
                     today_data.append({
                         "site": s[0],
-                        "status": s[1]
+                        "status": s[1],
+                        "site_id": site.get("id"),
+                        "type": type_str,
+                        "success": s.success,
+                        "logged_in": s.logged_in,
                     })
             else:
                 today_data = [{
                     "site": s[0],
-                    "status": s[1]
-                } for s in status]
+                    "status": s[1],
+                    "site_id": site.get("id"),
+                    "type": type_str,
+                    "success": s.success,
+                    "logged_in": s.logged_in,
+                } for site, s in zip(do_sites, status)]
             # 保存数据
             self.save_data(key, today_data)
 
@@ -1566,15 +1772,13 @@ class AutoSignInNew(_PluginBase):
             # 失败｜错误
             failed_msg = []
 
-            sites = {site.get('name'): site.get("id") for site in SitesHelper().get_indexers() if
-                     not site.get("public")}
-            for s in status:
+            for site, s in zip(do_sites, status):
                 site_name = s[0]
-                site_id = None
-                if site_name:
-                    site_id = sites.get(site_name)
+                # ThreadPool.map 保持输入顺序，直接绑定 ID，兼容同名和自定义站点。
+                site_id = site.get("id")
+                results[str(site_id)] = {"success": s.success, "message": s.message, "logged_in": s.logged_in}
 
-                if 'Cookie已失效' in str(s) and site_id:
+                if not s.logged_in and 'Cookie已失效' in s.message and site_id in builtin_site_ids:
                     # 触发自动登录插件登录
                     logger.info(f"触发站点 {site_name} 自动登录更新Cookie和Ua")
                     self.eventmanager.send_event(EventType.PluginAction,
@@ -1583,17 +1787,22 @@ class AutoSignInNew(_PluginBase):
                                                      "action": "site_refresh"
                                                  })
                 # 记录本次命中重试关键词的站点
+                if not s.completed:
+                    retry_sites.append(site_id)
                 if self._retry_keyword:
                     if site_id:
                         match = re.search(self._retry_keyword, s[1])
                         if match:
                             logger.debug(f"站点 {site_name} 命中重试关键词 {self._retry_keyword}")
-                            retry_sites.append(site_id)
+                            if site_id not in retry_sites:
+                                retry_sites.append(site_id)
                             # 命中的站点
                             retry_msg.append(s)
                             continue
 
-                if "登录成功" in str(s):
+                if not s.completed:
+                    failed_msg.append(s)
+                elif not s.success or "登录成功" in s.message:
                     login_success_msg.append(s)
                 elif "仿真签到成功" in str(s):
                     fz_sign_msg.append(s)
@@ -1607,14 +1816,15 @@ class AutoSignInNew(_PluginBase):
 
             if not self._retry_keyword:
                 # 没设置重试关键词则重试已选站点
-                retry_sites = self._sign_sites if type_str == "签到" else self._login_sites
+                retry_sites = selected_site_ids
             logger.debug(f"下次{type_str}重试站点 {retry_sites}")
 
             # 存入历史
             self.save_data(key=type_str + "-" + today,
                            value={
-                               "do": self._sign_sites if type_str == "签到" else self._login_sites,
-                               "retry": retry_sites
+                               "do": selected_site_ids,
+                               "retry": retry_sites,
+                               "results": results,
                            })
 
             # 自动Cloudflare IP优选
@@ -1623,10 +1833,10 @@ class AutoSignInNew(_PluginBase):
                     "action": "cloudflare_speedtest"
                 })
 
-            # 签到详细信息 仅失败--命中重试
+            # 发送通知：仅当存在失败或命中重试的站点时才通知，可用 notify_filters 进一步过滤
             signin_message = failed_msg + retry_msg
 
-            # 获取已经发送的数量
+            # 获取今日已经发送的通知数量
             cur_freq = int(self.get_data(key=f"freq-{today}") or 0)
 
             need_notify = True
@@ -1640,20 +1850,18 @@ class AutoSignInNew(_PluginBase):
             except Exception as e:
                 logger.error(f"表达式：{self._notify_filters}， 错误信息：{str(e)}")
 
-            # 发送通知
             if self._notify and len(signin_message) > 0 and need_notify:
                 signin_message = "\n".join([f'【{s[0]}】{s[1]}' for s in signin_message if s])
                 self.post_message(title=f"【站点自动{type_str}】",
                                   mtype=NotificationType.SiteMessage,
-                                  text=f"全部{type_str}数量: {len(self._sign_sites if type_str == '签到' else self._login_sites)} \n"
+                                  text=f"全部{type_str}数量: {len(selected_site_ids)} \n"
                                        f"本次{type_str}数量: {len(do_sites)} \n"
-                                       f"下次{type_str}数量: {len(retry_sites) if self._retry_keyword else 0} \n"
+                                       f"下次{type_str}数量: {len(retry_sites)} \n"
                                        f"{signin_message}"
                                   )
                 self.save_data(f"freq-{today}", cur_freq + 1)
             elif self._notify:
-                logger.info(f"全部{type_str}成功，无需发送通知消息")
-
+                logger.info(f"本次{type_str}无失败站点，无需发送通知")
             if event:
                 self.post_message(channel=event.event_data.get("channel"),
                                   title=f"站点{type_str}完成！", userid=event.event_data.get("user"))
@@ -1670,11 +1878,13 @@ class AutoSignInNew(_PluginBase):
         # 将 C 风格逻辑换成 Python 风格
         expr = expr.replace("&&", " and ")
         expr = expr.replace("||", " or ")
-        expr = re.sub(r"!\s*", " not ", expr)
+        # 只替换独立取反符，避免把 != / !== 误改成 not =
+        expr = re.sub(r"!(?!=)", " not ", expr)
         # 限制 eval 的上下文，只允许访问 variables
         return eval(expr, {"__builtins__": None}, variables)
 
     def __build_class(self, url) -> Any:
+        """按站点地址匹配专用签到处理器。"""
         for site_schema in self._site_schema:
             try:
                 if site_schema.match(url):
@@ -1694,17 +1904,18 @@ class AutoSignInNew(_PluginBase):
         site_info = SitesHelper().get_indexer(domain)
         if not site_info:
             return schemas.Response(
-                success=True,
+                success=False,
                 message=f"站点【{url}】不存在"
             )
         else:
-            site_name, message = self.signin_site(site_info)
+            result = self.signin_site(site_info)
             return schemas.Response(
-                success=True,
-                message=f"站点【{site_name}】{message or '签到成功'}"
+                success=result.success,
+                message=f"站点【{result.site_name}】{result.message}",
+                data={"signin_success": result.success, "login_success": result.logged_in},
             )
 
-    def signin_site(self, site_info: CommentedMap) -> Tuple[str, str]:
+    def signin_site(self, site_info: CommentedMap) -> SiteResult:
         """
         签到一个站点
         """
@@ -1713,31 +1924,55 @@ class AutoSignInNew(_PluginBase):
         start_time = datetime.now()
         if site_module and hasattr(site_module, "signin"):
             try:
+                # 部分站点（如北洋园）依赖大模型识别签到图片
                 site_info.setdefault("openai", self._openai)
                 state, message = site_module().signin(site_info)
             except Exception as e:
                 traceback.print_exc()
                 state, message = False, f"签到失败：{str(e)}"
+            result = self._site_result(site_info.get("name"), state, message, "签到")
         else:
-            state, message = self.__signin_base(site_info)
+            result = self.__signin_base(site_info)
+        if not result.completed and not getattr(site_module, "signin_is_login", False):
+            # 签到入口可能不存在或未包含用户导航，另行访问首页/登录接口确认保号访问。
+            login_result = self._login_result(site_info, site_module)
+            if login_result.success:
+                logger.info(f"{result.site_name} 已确认登录，原签到结果：{result.message}")
+                result = SiteResult(result.site_name, "登录成功，签到未确认", False, True)
+            elif result.message != login_result.message:
+                # 两个不同入口可能返回相同错误，只合并不同原因，避免通知重复。
+                result = result._replace(message=f"{result.message}；{login_result.message}")
         # 统计
         seconds = (datetime.now() - start_time).seconds
         domain = StringUtils.get_url_domain(site_info.get('url'))
-        if state:
+        if result.completed:
             SiteOper().success(domain=domain, seconds=seconds)
         else:
             SiteOper().fail(domain)
-        return site_info.get("name"), message
+        return result
 
     @staticmethod
-    def __signin_base(site_info: CommentedMap) -> Tuple[bool, str]:
+    def _site_result(site_name: str, state: bool, message: str, action: str) -> SiteResult:
+        """保留明确布尔结果；空结果或失败分支中的成功字样不能伪装成成功通知。"""
+        message = str(message or "").strip()
+        success = state is True and bool(message)
+        if not message:
+            message = f"{action}失败，未返回可确认的结果"
+        elif not success and "失败" not in message:
+            message = f"{action}失败：{message}"
+        if success and action == "签到" and "登录成功" in message:
+            return SiteResult(site_name, f"{message}（未执行签到）", False, True)
+        return SiteResult(site_name, message, success, success)
+
+    @staticmethod
+    def __signin_base(site_info: CommentedMap) -> SiteResult:
         """
         通用签到处理
         :param site_info: 站点信息
         :return: 签到结果信息
         """
         if not site_info:
-            return False, ""
+            return SiteResult("", "签到失败，缺少站点信息", False)
         site = site_info.get("name")
         site_url = site_info.get("url")
         site_cookie = site_info.get("cookie")
@@ -1748,8 +1983,8 @@ class AutoSignInNew(_PluginBase):
         timeout = site_info.get("timeout") or 60
         if not site_url or not site_cookie:
             logger.warn(f"未配置 {site} 的站点地址或Cookie，无法签到")
-            return False, ""
-        # 模拟登录
+            return SiteResult(site, "签到失败，未配置站点地址或Cookie", False)
+        # 访问签到接口后必须确认站点返回的完成状态。
         try:
             # 访问链接
             checkin_url = site_url
@@ -1763,61 +1998,54 @@ class AutoSignInNew(_PluginBase):
                                                                  ua=ua,
                                                                  proxies=proxy_server,
                                                                  timeout=timeout)
-                if not SiteUtils.is_logged_in(page_source):
-                    if under_challenge(page_source):
-                        return False, f"无法通过Cloudflare！"
-                    return False, f"仿真登录失败，Cookie已失效！"
-                else:
-                    # 判断是否已签到
-                    if re.search(r'已签|签到已得', page_source, re.IGNORECASE) \
-                            or SiteUtils.is_checkin(page_source):
-                        return True, f"签到成功"
-                    return True, "仿真签到成功"
             else:
                 res = RequestUtils(cookies=site_cookie,
                                    ua=ua,
                                    proxies=proxies,
                                    timeout=timeout
                                    ).get_res(url=checkin_url)
-                if not res and site_url != checkin_url:
-                    logger.info(f"开始站点模拟登录：{site}，地址：{site_url}...")
-                    res = RequestUtils(cookies=site_cookie,
-                                       ua=ua,
-                                       proxies=proxies,
-                                       timeout=timeout
-                                       ).get_res(url=site_url)
-                # 判断登录状态
-                if res and res.status_code in [200, 500, 403]:
-                    if not SiteUtils.is_logged_in(res.text):
-                        if under_challenge(res.text):
-                            msg = "站点被Cloudflare防护，请打开站点浏览器仿真"
-                        elif res.status_code == 200:
-                            msg = "Cookie已失效"
-                        else:
-                            msg = f"状态码：{res.status_code}"
-                        logger.warn(f"{site} 签到失败，{msg}")
-                        return False, f"签到失败，{msg}！"
-                    else:
-                        logger.info(f"{site} 签到成功")
-                        return True, f"签到成功"
-                elif res is not None:
-                    logger.warn(f"{site} 签到失败，状态码：{res.status_code}")
-                    return False, f"签到失败，状态码：{res.status_code}！"
-                else:
-                    logger.warn(f"{site} 签到失败，无法打开网站")
-                    return False, f"签到失败，无法打开网站！"
+                if res is None:
+                    return SiteResult(site, "签到失败，无法打开网站！", False)
+                if under_challenge(res.text):
+                    return SiteResult(site, "签到失败，站点被Cloudflare防护，请打开站点浏览器仿真", False)
+                if res.status_code != 200:
+                    return SiteResult(site, f"签到失败，状态码：{res.status_code}！", False)
+                page_source = res.text
+            if not page_source:
+                return SiteResult(site, "签到失败，站点返回空页面", False)
+            if under_challenge(page_source):
+                return SiteResult(site, "签到失败，无法通过Cloudflare！", False)
+            if not has_login_evidence(page_source):
+                return SiteResult(site, "签到失败，未识别到登录状态", False)
+            if has_signin_evidence(page_source):
+                logger.info(f"{site} 签到成功，已确认站点返回的签到状态")
+                return SiteResult(site, "签到成功", True, True)
+            logger.info(f"{site} 登录成功，签到未确认")
+            return SiteResult(site, "登录成功，签到未确认", False, True)
         except Exception as e:
             logger.warn("%s 签到失败：%s" % (site, str(e)))
             traceback.print_exc()
-            return False, f"签到失败：{str(e)}！"
+            return SiteResult(site, f"签到失败：{str(e)}！", False)
 
-    def login_site(self, site_info: CommentedMap) -> Tuple[str, str]:
+    def login_site(self, site_info: CommentedMap) -> SiteResult:
         """
         模拟登录一个站点
         """
         site_module = self.__build_class(site_info.get("url"))
         # 开始记时
         start_time = datetime.now()
+        result = self._login_result(site_info, site_module)
+        # 统计
+        seconds = (datetime.now() - start_time).seconds
+        domain = StringUtils.get_url_domain(site_info.get('url'))
+        if result.success:
+            SiteOper().success(domain=domain, seconds=seconds)
+        else:
+            SiteOper().fail(domain)
+        return result
+
+    def _login_result(self, site_info: CommentedMap, site_module: Any) -> SiteResult:
+        """复用专用登录接口或首页验证，不重复累计站点访问统计。"""
         if site_module and hasattr(site_module, "login"):
             try:
                 state, message = site_module().login(site_info)
@@ -1826,14 +2054,7 @@ class AutoSignInNew(_PluginBase):
                 state, message = False, f"模拟登录失败：{str(e)}"
         else:
             state, message = self.__login_base(site_info)
-        # 统计
-        seconds = (datetime.now() - start_time).seconds
-        domain = StringUtils.get_url_domain(site_info.get('url'))
-        if state:
-            SiteOper().success(domain=domain, seconds=seconds)
-        else:
-            SiteOper().fail(domain)
-        return site_info.get("name"), message
+        return self._site_result(site_info.get("name"), state, message, "模拟登录")
 
     @staticmethod
     def __login_base(site_info: CommentedMap) -> Tuple[bool, str]:
@@ -1843,7 +2064,7 @@ class AutoSignInNew(_PluginBase):
         :return: 签到结果信息
         """
         if not site_info:
-            return False, ""
+            return False, "模拟登录失败，缺少站点信息"
         site = site_info.get("name")
         site_url = site_info.get("url")
         site_cookie = site_info.get("cookie")
@@ -1853,12 +2074,13 @@ class AutoSignInNew(_PluginBase):
         proxy_server = settings.PROXY_SERVER if site_info.get("proxy") else None
         timeout = site_info.get("timeout") or 60
         if not site_url or not site_cookie:
-            logger.warn(f"未配置 {site} 的站点地址或Cookie，无法签到")
-            return False, ""
+            logger.warn(f"未配置 {site} 的站点地址或Cookie，无法登录")
+            return False, "模拟登录失败，未配置站点地址或Cookie"
         # 模拟登录
         try:
             # 访问链接
-            site_url = str(site_url).replace("attendance.php", "")
+            if "attendance.php" in site_url:
+                site_url = urljoin(site_url, "./")
             logger.info(f"开始站点模拟登录：{site}，地址：{site_url}...")
             if render:
                 page_source = PlaywrightHelper().get_page_source(url=site_url,
@@ -1866,38 +2088,29 @@ class AutoSignInNew(_PluginBase):
                                                                  ua=ua,
                                                                  proxies=proxy_server,
                                                                  timeout=timeout)
-                if not SiteUtils.is_logged_in(page_source):
-                    if under_challenge(page_source):
-                        return False, f"无法通过Cloudflare！"
-                    return False, f"仿真登录失败，Cookie已失效！"
-                else:
-                    return True, "模拟登录成功"
             else:
                 res = RequestUtils(cookies=site_cookie,
                                    ua=ua,
                                    proxies=proxies,
                                    timeout=timeout
                                    ).get_res(url=site_url)
-                # 判断登录状态
-                if res and res.status_code in [200, 500, 403]:
-                    if not SiteUtils.is_logged_in(res.text):
-                        if under_challenge(res.text):
-                            msg = "站点被Cloudflare防护，请打开站点浏览器仿真"
-                        elif res.status_code == 200:
-                            msg = "Cookie已失效"
-                        else:
-                            msg = f"状态码：{res.status_code}"
-                        logger.warn(f"{site} 模拟登录失败，{msg}")
-                        return False, f"模拟登录失败，{msg}！"
-                    else:
-                        logger.info(f"{site} 模拟登录成功")
-                        return True, f"模拟登录成功"
-                elif res is not None:
-                    logger.warn(f"{site} 模拟登录失败，状态码：{res.status_code}")
-                    return False, f"模拟登录失败，状态码：{res.status_code}！"
-                else:
-                    logger.warn(f"{site} 模拟登录失败，无法打开网站")
+                if res is None:
                     return False, f"模拟登录失败，无法打开网站！"
+                if under_challenge(res.text):
+                    return False, "模拟登录失败，站点被Cloudflare防护，请打开站点浏览器仿真"
+                if res.status_code != 200:
+                    return False, f"模拟登录失败，状态码：{res.status_code}！"
+                page_source = res.text
+            if not page_source:
+                return False, "模拟登录失败，站点返回空页面"
+            if under_challenge(page_source):
+                return False, "模拟登录失败，无法通过Cloudflare！"
+            if not has_login_evidence(page_source):
+                if has_login_form(page_source):
+                    return False, "模拟登录失败，Cookie已失效"
+                return False, "模拟登录失败，未识别到登录状态"
+            logger.info(f"{site} 模拟登录成功")
+            return True, "模拟登录成功"
         except Exception as e:
             logger.warn("%s 模拟登录失败：%s" % (site, str(e)))
             traceback.print_exc()
@@ -1930,6 +2143,9 @@ class AutoSignInNew(_PluginBase):
             self.__update_config()
 
     def __remove_site_id(self, do_sites, site_id):
+        """移除已删除站点；全选模式保留以便自动纳入后续新增站点。"""
+        if self._ALL_SITES in do_sites:
+            return [self._ALL_SITES]
         if do_sites:
             if isinstance(do_sites, str):
                 do_sites = [do_sites]

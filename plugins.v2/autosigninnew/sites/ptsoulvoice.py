@@ -126,7 +126,6 @@ class PtSoulvoice(_ISiteSigninHandler):
                                           regexs=self._succeed_regex)
         if sign_status:
             logger.info(f"{site} 签到成功")
-            self.__rank(site_cookie, ua, proxy, site)
             return True, '签到成功'
         else:
             logger.error(f"{site} 签到失败，请到页面查看")

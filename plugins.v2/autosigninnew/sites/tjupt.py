@@ -24,7 +24,9 @@ class Tjupt(_ISiteSigninHandler):
     _sign_regex = ['<a href="attendance.php">今日已签到</a>']
 
     # 签到成功
-    _succeed_regex = ['[今日已签到]']
+    _succeed_regex = ['这是您的首次签到，本次签到获得\\d+个魔力值。',
+                      '签到成功，这是您的第\\d+次签到，已连续签到\\d+天，本次签到获得\\d+个魔力值。',
+                      '重新签到成功，本次签到获得\\d+个魔力值']
 
     @classmethod
     def match(cls, url: str) -> bool:
@@ -80,7 +82,8 @@ class Tjupt(_ISiteSigninHandler):
         html = etree.HTML(html_text)
         if not html:
             return False, '签到失败'
-        img_url = html.xpath('//table[@class="captcha"]//img/@src')[0]
+        img_url_list = html.xpath('//table[@class="captcha"]//img/@src')
+        img_url = img_url_list[0] if img_url_list else ''
 
         if not img_url:
             logger.error(f"{site} 签到失败，未获取到签到图片")

@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
 import base64
 import re
+import time
 from abc import ABCMeta, abstractmethod
 from typing import Tuple
 
 import chardet
+from lxml import etree
 from ruamel.yaml import CommentedMap
-import time
+
 from app.core.config import settings
 from app.helper.browser import PlaywrightHelper
+from app.helper.ocr import OcrHelper
 from app.log import logger
+from app.plugins.autosigninnew.result import visible_html
 from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
-from app.helper.ocr import OcrHelper
 
 
 class _ISiteSigninHandler(metaclass=ABCMeta):
@@ -22,6 +25,8 @@ class _ISiteSigninHandler(metaclass=ABCMeta):
     """
     # 匹配的站点Url，每一个实现类都需要设置为自己的站点Url
     site_url = ""
+    # 签到入口若已经执行登录保号，失败后不能再调用相同接口作为登录回退。
+    signin_is_login: bool = False
 
     @abstractmethod
     def match(self, url: str) -> bool:
@@ -77,7 +82,7 @@ class _ISiteSigninHandler(metaclass=ABCMeta):
             res = RequestUtils(headers=headers,
                                proxies=settings.PROXY if proxy else None,
                                timeout=timeout or 20).get_res(url=url)
-            if res is not None:
+            if res is not None and res.status_code == 200:
                 # 使用chardet检测字符编码
                 raw_data = res.content
                 if raw_data:
@@ -96,18 +101,24 @@ class _ISiteSigninHandler(metaclass=ABCMeta):
     @staticmethod
     def sign_in_result(html_res: str, regexs: list) -> bool:
         """
-        判断是否签到成功
+        仅匹配可见页面中的签到结果，脚本和隐藏模板里的文案不代表已执行。
         """
-        html_text = re.sub(r"#\d+", "", re.sub(r"\d+px", "", html_res))
+        html_text = re.sub(r"#\d+", "", re.sub(r"\d+px", "", visible_html(html_res)))
+        document = etree.HTML(html_text)
+        text = "".join(document.itertext()) if document is not None else ""
+        if re.search(r"(?:签到|簽到)(?:失败|失敗|未成功)|(?:未|没有|沒有)(?:签到|簽到)成功", text):
+            return False
         for regex in regexs:
-            if re.search(str(regex), html_text):
+            # 纯文案只查正文，不能命中 onclick/title 等属性里的成功提示。
+            target = html_text if "<" in regex or "value=" in regex else text
+            if re.search(str(regex), target):
                 return True
         return False
 
     @staticmethod
     def download_image(img_url, site_cookie, ua, proxy, site):
         """
-        Download image and convert to base64 data URI.
+        下载图片并转换为 base64 data URI，供大模型识图使用。
         """
         img_res = RequestUtils(cookies=site_cookie,
                                ua=ua,
@@ -116,14 +127,14 @@ class _ISiteSigninHandler(metaclass=ABCMeta):
             logger.error(f"{site} 获取图片 {img_url} 请求失败")
             return False, ''
 
-        # Get MIME type
+        # 获取 MIME 类型
         content_type = img_res.headers.get('Content-Type', '')
         mime_type = _ISiteSigninHandler.__detect_mime_type(content_type, img_res.content)
 
         if not mime_type:
             return False, ''
 
-        # Base64 encoding
+        # Base64 编码
         img_base64 = base64.b64encode(img_res.content).decode('utf-8')
         return True, f"data:{mime_type};base64,{img_base64}"
 
@@ -156,24 +167,24 @@ class _ISiteSigninHandler(metaclass=ABCMeta):
     @staticmethod
     def __detect_mime_type(content_type: str, data: bytes) -> str:
         """
-        Determine image MIME type from Content-Type header and file signature.
+        根据 Content-Type 头和文件签名判断图片 MIME 类型。
         """
-        # Check common image signatures (magic numbers)
+        # 常见图片签名（magic number）
         image_signatures = {
             b'\xFF\xD8\xFF': 'image/jpeg',
             b'\x89PNG\r\n\x1a\n': 'image/png',
             b'GIF87a': 'image/gif',
             b'GIF89a': 'image/gif',
-            b'RIFF': 'image/webp',  # WebP starts with RIFF
+            b'RIFF': 'image/webp',  # WebP 以 RIFF 开头
             b'BM': 'image/bmp',
         }
 
-        # Check file signature first
+        # 优先按文件签名判断
         for signature, mime in image_signatures.items():
             if data.startswith(signature):
                 return mime
 
-        # Fall back to Content-Type header
+        # 回退到 Content-Type 头
         if content_type:
             mime = content_type.split(';')[0].strip().lower()
             if mime.startswith('image/'):
