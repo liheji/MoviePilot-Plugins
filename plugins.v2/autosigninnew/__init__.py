@@ -25,7 +25,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from ruamel.yaml import CommentedMap
 from app.plugins.autosigninnew.openai import OpenAi
-from app.plugins.autosigninnew.result import SiteResult, has_login_evidence, has_login_form, has_signin_evidence
+from app.plugins.autosigninnew.result import SiteResult, has_login_evidence, has_login_form, page_signin_result, signin_diagnostics
 
 class AutoSignInNew(_PluginBase):
     """按配置执行站点签到和模拟登录，并记录结果与发送通知。"""
@@ -37,7 +37,7 @@ class AutoSignInNew(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "3.7.1"
+    plugin_version = "3.7.3"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -611,7 +611,7 @@ class AutoSignInNew(_PluginBase):
                                                     '1、5位cron表达式；'
                                                     '2、配置间隔（小时），如2.3/9-23（9-23点之间每隔2.3小时执行一次）；'
                                                     '3、周期不填默认9-23点随机执行2次。'
-                                                    '每天首次全量执行，其余重试未确认登录或命中重试关键词的站点。'
+                                                    '每天首次全量执行，其余重试未确认签到、未确认登录或命中重试关键词的站点。'
                                                     '已确认登录但签到未确认的站点会单独记录登录成功。'
                                         }
                                     }
@@ -1701,11 +1701,10 @@ class AutoSignInNew(_PluginBase):
             # 今天已签到|登录站点
             already_sites = today_history.get("do") or []
 
-            # 今日未签|登录站点
+            # 今日未签|登录站点：没有确认成功的一律重试，避免「登录成功，签到未确认」被当成已完成
             no_sites = [site for site in do_sites if
                         site.get("id") not in already_sites or site.get("id") in retry_sites
-                        or not (results.get(str(site.get("id")), {}).get("success")
-                                or results.get(str(site.get("id")), {}).get("logged_in"))]
+                        or not results.get(str(site.get("id")), {}).get("success")]
 
             if not no_sites:
                 logger.info(f"今日 {today} 已{type_str}，无重新{type_str}站点，本次任务结束")
@@ -1713,7 +1712,7 @@ class AutoSignInNew(_PluginBase):
 
             # 任务站点 = 需要重试+今日未do
             do_sites = no_sites
-            logger.info(f"今日 {today} 已执行{type_str}，重试未确认登录或命中关键词的站点")
+            logger.info(f"今日 {today} 已执行{type_str}，重试未确认{type_str}或命中关键词的站点")
 
         if not do_sites:
             logger.info(f"没有需要{type_str}的站点")
@@ -1786,8 +1785,8 @@ class AutoSignInNew(_PluginBase):
                                                      "site_id": site_id,
                                                      "action": "site_refresh"
                                                  })
-                # 记录本次命中重试关键词的站点
-                if not s.completed:
+                # 未确认签到（登录正常但拿不到回执）与失败站点都要进入下一次重试队列
+                if not s.success:
                     retry_sites.append(site_id)
                 if self._retry_keyword:
                     if site_id:
@@ -2011,17 +2010,23 @@ class AutoSignInNew(_PluginBase):
                 if res.status_code != 200:
                     return SiteResult(site, f"签到失败，状态码：{res.status_code}！", False)
                 page_source = res.text
-            if not page_source:
-                return SiteResult(site, "签到失败，站点返回空页面", False)
-            if under_challenge(page_source):
-                return SiteResult(site, "签到失败，无法通过Cloudflare！", False)
-            if not has_login_evidence(page_source):
-                return SiteResult(site, "签到失败，未识别到登录状态", False)
-            if has_signin_evidence(page_source):
+            result = page_signin_result(site, page_source)
+            if not result.success and result.logged_in:
+                # 站点升级后 attendance.php 可能只在 POST 时执行签到（GET 仅渲染页面）。
+                logger.info(f"{site} GET 未返回签到回执，改用 POST 提交签到")
+                post_res = RequestUtils(cookies=site_cookie,
+                                        ua=ua,
+                                        referer=checkin_url,
+                                        proxies=proxies,
+                                        timeout=timeout
+                                        ).post_res(url=checkin_url, data={})
+                page_source = (post_res.text if post_res is not None else "") or page_source
+                result = page_signin_result(site, page_source)
+            if result.success:
                 logger.info(f"{site} 签到成功，已确认站点返回的签到状态")
-                return SiteResult(site, "签到成功", True, True)
-            logger.info(f"{site} 登录成功，签到未确认")
-            return SiteResult(site, "登录成功，签到未确认", False, True)
+            elif result.logged_in:
+                logger.info(f"{site} 登录成功，签到未确认：{signin_diagnostics(page_source)}")
+            return result
         except Exception as e:
             logger.warn("%s 签到失败：%s" % (site, str(e)))
             traceback.print_exc()

@@ -3,6 +3,7 @@
 import re
 from typing import NamedTuple
 
+from app.helper.cloudflare import under_challenge
 from app.utils.site import SiteUtils
 from lxml import etree
 
@@ -108,3 +109,29 @@ def has_signin_evidence(source: str) -> bool:
         text,
         re.IGNORECASE,
     ))
+
+
+def signin_diagnostics(source: str) -> str:
+    """给出「未确认签到」页面的诊断指纹：签到入口还在，还是只拿到一段无关文案。"""
+    document = etree.HTML(visible_html(source))
+    if document is None:
+        return "页面无法解析"
+    for node in document.xpath("//input[@type='submit'] | //button"):
+        label = re.sub(r"\s+", "", node.get("value") or "".join(node.itertext())).lower()
+        if label in {"签到", "簽到", "立即签到", "立即簽到", "每日签到", "打卡", "checkin", "checkinnow"}:
+            return "页面仍存在签到入口，签到请求可能未真正提交"
+    text = re.sub(r"\s+", " ", " ".join(document.itertext())).strip()
+    return f"可见文案：{text[:120]}" if text else "页面无可见文案"
+
+
+def page_signin_result(site_name: str, source: str) -> SiteResult:
+    """按页面证据判定签到结果，拿不到回执时不虚构成功。"""
+    if not source:
+        return SiteResult(site_name, "签到失败，站点返回空页面", False)
+    if under_challenge(source):
+        return SiteResult(site_name, "签到失败，无法通过Cloudflare！", False)
+    if not has_login_evidence(source):
+        return SiteResult(site_name, "签到失败，未识别到登录状态", False)
+    if has_signin_evidence(source):
+        return SiteResult(site_name, "签到成功", True, True)
+    return SiteResult(site_name, "登录成功，签到未确认", False, True)
