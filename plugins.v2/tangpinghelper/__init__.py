@@ -21,9 +21,9 @@ from app.utils.http import RequestUtils
 class TangPingHelper(_PluginBase):
     # ==================== 插件元数据 ====================
     plugin_name = "躺平PT助手"
-    plugin_desc = "躺平PT自动领红包、抽奖累加器、任务与勋章领取。\n支持自动领取红包、循环抽奖、智能任务领取、自动领取全部可领取勋章，各功能独立开关与定时，每日统计数据按天清除。"
+    plugin_desc = "躺平PT自动领红包、抽奖累加器、任务与勋章领取。\n支持自动领取红包、循环抽奖、智能任务领取、自动领取魔力加成≥0的可领取勋章，各功能独立开关与定时，每日统计数据按天清除。"
     plugin_icon = "tangping.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "yilee"
     author_url = "https://github.com/yilee"
     plugin_config_prefix = "tangpinghelper_"
@@ -295,6 +295,22 @@ class TangPingHelper(_PluginBase):
         if node is None:
             return ""
         return " ".join(text.strip() for text in node.itertext() if text.strip())
+
+    @staticmethod
+    def _parse_percent(value: str) -> Optional[float]:
+        """解析百分比文本，如 '1%' -> 1.0，'-5%' -> -5.0"""
+        if not value:
+            return None
+        text = (
+            str(value).strip()
+            .replace("％", "").replace("%", "")
+            .replace("＋", "+").replace("－", "-").replace("−", "-")
+            .replace(",", "").strip()
+        )
+        try:
+            return float(text)
+        except ValueError:
+            return None
 
     def _fetch_task_page(self, site_info: Dict) -> Optional[str]:
         """获取任务页面 HTML"""
@@ -964,7 +980,7 @@ class TangPingHelper(_PluginBase):
     def _parse_medals(self, html: str) -> List[Dict]:
         """
         解析勋章列表页面，提取每枚勋章的购买状态。
-        可领取的判定：存在 class="buy" 且未 disabled 的按钮。
+        可领取的判定：存在 class="buy" 且未 disabled 的按钮，且魔力加成 >= 0。
         """
         if not html:
             return []
@@ -991,8 +1007,16 @@ class TangPingHelper(_PluginBase):
             if not buttons:
                 continue
 
+            bonus = self._node_text(cells[5]) if len(cells) > 5 else ""
+            bonus_value = self._parse_percent(bonus)
+
             buy_buttons = [b for b in buttons if "buy" in (b.get("class") or "").split()]
-            claimable = any(b.get("disabled") is None for b in buy_buttons)
+            button_claimable = any(b.get("disabled") is None for b in buy_buttons)
+            claimable = (
+                button_claimable
+                and bonus_value is not None
+                and bonus_value >= 0
+            )
             status_button = buy_buttons[0] if buy_buttons else next(
                 (b for b in buttons if "gift" not in (b.get("class") or "").split()), None
             )
@@ -1004,11 +1028,14 @@ class TangPingHelper(_PluginBase):
             )
 
             price = self._node_text(cells[6]) if len(cells) > 6 else ""
-            bonus = self._node_text(cells[5]) if len(cells) > 5 else ""
             status_value = (status_button.get("value") or "") if status_button is not None else ""
 
             if claimable:
                 status = "可领取"
+            elif button_claimable and bonus_value is not None and bonus_value < 0:
+                status = "加成为负"
+            elif button_claimable and bonus_value is None:
+                status = "加成未知"
             elif status_button is None or "已经购买" in status_value:
                 status = "已购买"
             elif "已过可购买时间" in status_value:
@@ -1021,6 +1048,7 @@ class TangPingHelper(_PluginBase):
                 "name": name,
                 "price": price,
                 "bonus": bonus,
+                "bonus_value": bonus_value,
                 "claimable": claimable,
                 "status": status,
             })
@@ -1128,6 +1156,25 @@ class TangPingHelper(_PluginBase):
             stats["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logger.warning("[勋章] 未解析到任何勋章")
             return stats
+
+        negative_bonus = [
+            m for m in all_medals.values() if m["status"] == "加成为负"
+        ]
+        if negative_bonus:
+            names = "、".join(
+                f"{m['name']}({m['bonus']})" for m in negative_bonus[:10]
+            )
+            logger.info(
+                f"[勋章] 魔力加成为负，禁止领取 {len(negative_bonus)} 枚: {names}"
+            )
+
+        unknown_bonus = [
+            m for m in all_medals.values() if m["status"] == "加成未知"
+        ]
+        if unknown_bonus:
+            logger.warning(
+                f"[勋章] {len(unknown_bonus)} 枚勋章魔力加成无法解析，按禁止领取处理"
+            )
 
         claimable = sorted(
             [m for m in all_medals.values() if m["claimable"]],
@@ -1725,7 +1772,8 @@ class TangPingHelper(_PluginBase):
                                                     '留空则不定时执行。'
                                                     '抽奖固定循环至次数用完（间隔5s）；红包循环领取至无红包；'
                                                     '任务距今日结束≥2h可领，月末 BUG>VIP>苍蝇腿，平时只领苍蝇腿；'
-                                                    '勋章会遍历全部分页，领取所有可领取（含购买）的勋章。'
+                                                    '勋章会遍历全部分页，领取所有魔力加成≥0且可领取（含购买）的勋章；'
+                                                    '加成为负或无法解析的勋章禁止领取。'
                                         }
                                     }
                                 ]
