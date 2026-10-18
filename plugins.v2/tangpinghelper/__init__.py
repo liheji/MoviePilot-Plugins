@@ -3,10 +3,12 @@ import time
 import traceback
 from datetime import datetime, timedelta
 from typing import Any, List, Dict, Tuple, Optional
+from urllib.parse import parse_qs, urlparse
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from lxml import etree
 
 from app.core.config import settings
 from app.helper.sites import SitesHelper
@@ -19,9 +21,9 @@ from app.utils.http import RequestUtils
 class TangPingHelper(_PluginBase):
     # ==================== 插件元数据 ====================
     plugin_name = "躺平PT助手"
-    plugin_desc = "躺平PT自动领红包、抽奖累加器与任务领取。\n支持自动领取红包、循环抽奖、智能任务领取三个独立功能，每日统计数据按天清除。"
+    plugin_desc = "躺平PT自动领红包、抽奖累加器、任务与勋章领取。\n支持自动领取红包、循环抽奖、智能任务领取、自动领取全部可领取勋章，各功能独立开关与定时，每日统计数据按天清除。"
     plugin_icon = "tangping.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.1"
     plugin_author = "yilee"
     author_url = "https://github.com/yilee"
     plugin_config_prefix = "tangpinghelper_"
@@ -34,6 +36,10 @@ class TangPingHelper(_PluginBase):
     LOTTERY_PAGE_PATH = "/omnibot_lottery.php"
     LOTTERY_DRAW_PATH = "/web/omnibot/lottery/draw"
     LOTTERY_DELAY = 5  # 固定每轮间隔（秒）
+    MEDAL_PAGE_PATH = "/medal.php"
+    MEDAL_AJAX_PATH = "/ajax.php"
+    MEDAL_DELAY = 1.2  # 每次领取间隔（秒）
+    MEDAL_MAX_PAGES = 200  # 分页安全上限
 
     # ==================== 私有属性 ====================
     _scheduler: Optional[BackgroundScheduler] = None
@@ -46,16 +52,19 @@ class TangPingHelper(_PluginBase):
     _enabled_lottery: bool = False
     _enabled_redpacket: bool = False
     _enabled_task: bool = False
+    _enabled_medal: bool = False
 
     # 各功能独立 cron
     _cron_lottery: str = ""
     _cron_redpacket: str = ""
     _cron_task: str = ""
+    _cron_medal: str = ""
 
     # 各功能独立「立即」按钮
     _onlyonce_lottery: bool = False
     _onlyonce_redpacket: bool = False
     _onlyonce_task: bool = False
+    _onlyonce_medal: bool = False
 
     # 任务相关常量
     TASK_PAGE_PATH = "/task.php"
@@ -78,19 +87,23 @@ class TangPingHelper(_PluginBase):
             self._enabled_lottery = config.get("enabled_lottery", False)
             self._enabled_redpacket = config.get("enabled_redpacket", False)
             self._enabled_task = config.get("enabled_task", False)
+            self._enabled_medal = config.get("enabled_medal", False)
 
             self._cron_lottery = config.get("cron_lottery") or "0 */6 * * *"
             self._cron_redpacket = config.get("cron_redpacket") or "*/10 * * * *"
             self._cron_task = config.get("cron_task") or "0 */6 * * *"
+            self._cron_medal = config.get("cron_medal") or "0 9 * * *"
 
             self._onlyonce_lottery = config.get("onlyonce_lottery", False)
             self._onlyonce_redpacket = config.get("onlyonce_redpacket", False)
             self._onlyonce_task = config.get("onlyonce_task", False)
+            self._onlyonce_medal = config.get("onlyonce_medal", False)
 
             self.__update_config()
 
         # 站点自检：启用/立即运行前必须存在躺平PT站点，否则自动关闭并告警
-        any_onlyonce = self._onlyonce_lottery or self._onlyonce_redpacket or self._onlyonce_task
+        any_onlyonce = (self._onlyonce_lottery or self._onlyonce_redpacket
+                        or self._onlyonce_task or self._onlyonce_medal)
         if self._enabled or any_onlyonce:
             if self._get_site_info(quiet=True) is None:
                 logger.warning(
@@ -101,21 +114,25 @@ class TangPingHelper(_PluginBase):
                 self._onlyonce_lottery = False
                 self._onlyonce_redpacket = False
                 self._onlyonce_task = False
+                self._onlyonce_medal = False
                 self.__update_config()
 
         # 检查是否需要立即运行
-        any_onlyonce = self._onlyonce_lottery or self._onlyonce_redpacket or self._onlyonce_task
+        any_onlyonce = (self._onlyonce_lottery or self._onlyonce_redpacket
+                        or self._onlyonce_task or self._onlyonce_medal)
         if self._enabled or any_onlyonce:
             if any_onlyonce:
                 # 在重置前捕获需要执行的模块
                 do_lottery = self._onlyonce_lottery
                 do_redpacket = self._onlyonce_redpacket
                 do_task = self._onlyonce_task
+                do_medal = self._onlyonce_medal
 
                 # 立即重置开关
                 self._onlyonce_lottery = False
                 self._onlyonce_redpacket = False
                 self._onlyonce_task = False
+                self._onlyonce_medal = False
                 self.__update_config()
 
                 # 调度执行（用闭包捕获的变量）
@@ -123,7 +140,12 @@ class TangPingHelper(_PluginBase):
                 logger.info("躺平PT助手服务启动，立即运行一次")
                 self._scheduler.add_job(
                     func=self._run_immediate,
-                    kwargs={"do_lottery": do_lottery, "do_redpacket": do_redpacket, "do_task": do_task},
+                    kwargs={
+                        "do_lottery": do_lottery,
+                        "do_redpacket": do_redpacket,
+                        "do_task": do_task,
+                        "do_medal": do_medal,
+                    },
                     trigger='date',
                     run_date=datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(seconds=3),
                     name="躺平PT助手"
@@ -156,12 +178,15 @@ class TangPingHelper(_PluginBase):
             "enabled_lottery": self._enabled_lottery,
             "enabled_redpacket": self._enabled_redpacket,
             "enabled_task": self._enabled_task,
+            "enabled_medal": self._enabled_medal,
             "cron_lottery": self._cron_lottery,
             "cron_redpacket": self._cron_redpacket,
             "cron_task": self._cron_task,
+            "cron_medal": self._cron_medal,
             "onlyonce_lottery": self._onlyonce_lottery,
             "onlyonce_redpacket": self._onlyonce_redpacket,
             "onlyonce_task": self._onlyonce_task,
+            "onlyonce_medal": self._onlyonce_medal,
         })
 
     # ==================== 站点信息获取 ====================
@@ -251,7 +276,7 @@ class TangPingHelper(_PluginBase):
 
     def _clear_old_data(self):
         """清除非今日的统计数据"""
-        prefixes = ["redpacket_stats", "lottery_stats", "task_stats"]
+        prefixes = ["redpacket_stats", "lottery_stats", "task_stats", "medal_stats"]
         for prefix in prefixes:
             # 获取所有相关键（通过尝试昨天及以前的模式）
             for days_ago in range(1, 32):
@@ -263,6 +288,13 @@ class TangPingHelper(_PluginBase):
                     logger.debug(f"已清除旧数据: {old_key}")
 
     # ==================== 任务模块 ====================
+
+    @staticmethod
+    def _node_text(node) -> str:
+        """提取 lxml 节点文本并归一化空白"""
+        if node is None:
+            return ""
+        return " ".join(text.strip() for text in node.itertext() if text.strip())
 
     def _fetch_task_page(self, site_info: Dict) -> Optional[str]:
         """获取任务页面 HTML"""
@@ -280,25 +312,35 @@ class TangPingHelper(_PluginBase):
         if not html:
             return []
 
-        tasks = []
-        # 匹配每个任务行：任务名 + 按钮信息
-        pattern = re.compile(
-            r'<td class="nowrap"><strong>([^<]+)</strong></td>'
-            r'.*?'
-            r'<input type="button" class="([^"]*)" data-id="(\d+)" value="([^"]*)"'
-            r'(\s+disabled)?\s*>',
-            re.DOTALL
-        )
+        root = etree.HTML(html)
+        if root is None:
+            return []
 
-        for m in pattern.finditer(html):
-            name = m.group(1).strip()
-            btn_class = m.group(2).strip()
-            exam_id = int(m.group(3))
-            btn_value = m.group(4).strip()
-            has_disabled = bool(m.group(5))  # 捕获 disabled 属性存在与否
+        tasks = []
+        name_tags = root.xpath('//td[@class="nowrap"]/strong')
+        for name_tag in name_tags:
+            rows = name_tag.xpath("ancestor::tr[1]")
+            if not rows:
+                continue
+            row = rows[0]
+            button = next(
+                (
+                    b for b in row.xpath('.//input[@type="button"]')
+                    if (b.get("data-id") or "").isdigit()
+                ),
+                None,
+            )
+            if button is None:
+                continue
+
+            exam_id_text = button.get("data-id", "")
+            name = self._node_text(name_tag)
+            exam_id = int(exam_id_text)
+            btn_class = (button.get("class") or "").strip()
+            btn_value = (button.get("value") or "").strip()
 
             claimed = "已经认领" in btn_value
-            claimable = btn_class == "claim" and not claimed and not has_disabled
+            claimable = btn_class == "claim" and not claimed and button.get("disabled") is None
 
             tasks.append({
                 "name": name,
@@ -706,18 +748,29 @@ class TangPingHelper(_PluginBase):
         """从抽奖页面 HTML 解析今日剩余可抽次数"""
         if not html:
             return -1
+
+        root = etree.HTML(html)
+        if root is None:
+            return -1
+
+        scripts = root.xpath("//script")
         # 优先从 JS 状态对象解析
-        m = re.search(r'"dailyDrawRemaining":(\d+)', html)
-        if m:
-            remaining = int(m.group(1))
-            logger.info(f"[抽奖] 今日剩余抽奖次数: {remaining}")
-            return remaining
-        # 备选：从页面文案解析
-        m = re.search(r'今天还可以抽\s*(\d+)\s*次', html)
-        if m:
-            remaining = int(m.group(1))
-            logger.info(f"[抽奖] 今日剩余抽奖次数(文案): {remaining}")
-            return remaining
+        for script in scripts:
+            m = re.search(r'"dailyDrawRemaining"\s*:\s*(\d+)', self._node_text(script))
+            if m:
+                remaining = int(m.group(1))
+                logger.info(f"[抽奖] 今日剩余抽奖次数: {remaining}")
+                return remaining
+
+        # 备选：从页面文案解析（保留脚本内文案兜底）
+        texts = [self._node_text(root)]
+        texts.extend(self._node_text(script) for script in scripts)
+        for text in texts:
+            m = re.search(r'今天还可以抽\s*(\d+)\s*次', text)
+            if m:
+                remaining = int(m.group(1))
+                logger.info(f"[抽奖] 今日剩余抽奖次数(文案): {remaining}")
+                return remaining
         logger.warning("[抽奖] 无法解析剩余抽奖次数")
         return -1
 
@@ -906,23 +959,249 @@ class TangPingHelper(_PluginBase):
         )
         return stats
 
+    # ==================== 勋章模块 ====================
+
+    def _parse_medals(self, html: str) -> List[Dict]:
+        """
+        解析勋章列表页面，提取每枚勋章的购买状态。
+        可领取的判定：存在 class="buy" 且未 disabled 的按钮。
+        """
+        if not html:
+            return []
+
+        root = etree.HTML(html)
+        if root is None:
+            return []
+
+        medals = []
+        for row in root.xpath("//tr"):
+            cells = row.xpath("./td")
+            if len(cells) < 3:
+                continue
+            first_text = self._node_text(cells[0])
+            if not first_text.isdigit():
+                continue
+            medal_id = int(first_text)
+
+            buttons = [
+                button for button in row.xpath('.//input[@type="button"]')
+                if button.get("data-id") == str(medal_id)
+            ]
+
+            if not buttons:
+                continue
+
+            buy_buttons = [b for b in buttons if "buy" in (b.get("class") or "").split()]
+            claimable = any(b.get("disabled") is None for b in buy_buttons)
+            status_button = buy_buttons[0] if buy_buttons else next(
+                (b for b in buttons if "gift" not in (b.get("class") or "").split()), None
+            )
+
+            name_cell = cells[2] if len(cells) > 2 else None
+            name_tags = name_cell.xpath(".//h1") if name_cell is not None else []
+            name = self._node_text(name_tags[0]) if name_tags else (
+                self._node_text(name_cell) if name_cell is not None else f"勋章 {medal_id}"
+            )
+
+            price = self._node_text(cells[6]) if len(cells) > 6 else ""
+            bonus = self._node_text(cells[5]) if len(cells) > 5 else ""
+            status_value = (status_button.get("value") or "") if status_button is not None else ""
+
+            if claimable:
+                status = "可领取"
+            elif status_button is None or "已经购买" in status_value:
+                status = "已购买"
+            elif "已过可购买时间" in status_value:
+                status = "已过期"
+            else:
+                status = status_value or "不可领取"
+
+            medals.append({
+                "id": medal_id,
+                "name": name,
+                "price": price,
+                "bonus": bonus,
+                "claimable": claimable,
+                "status": status,
+            })
+        return medals
+
+    def _parse_medal_max_page(self, html: str) -> int:
+        """解析勋章列表最大分页下标（页面从 0 开始）"""
+        if not html:
+            return 0
+
+        root = etree.HTML(html)
+        if root is None:
+            return 0
+
+        pages = []
+        for href in root.xpath("//a/@href"):
+            query = parse_qs(urlparse(href).query)
+            pages.extend(int(p) for p in query.get("page", []) if p.isdigit())
+
+        for script in root.xpath("//script"):
+            m = re.search(r'\bmaxpage\s*=\s*(\d+)', self._node_text(script))
+            if m:
+                pages.append(int(m.group(1)))
+                break
+
+        return max(pages) if pages else 0
+
+    def _fetch_all_medals(self, site_info: Dict, stats: Dict) -> Dict[int, Dict]:
+        """逐页抓取全部勋章，返回 {id: medal}"""
+        all_medals: Dict[int, Dict] = {}
+        page_loaded = False
+        page_index = 0
+        max_page = 0
+
+        while page_index <= max_page and page_index < self.MEDAL_MAX_PAGES:
+            path = f"{self.MEDAL_PAGE_PATH}?page={page_index}"
+            res = self._make_get_request(site_info, path)
+            if res is None or res.status_code != 200:
+                msg = f"获取勋章第 {page_index} 页失败: HTTP {res.status_code if res else '无响应'}"
+                logger.warning(f"[勋章] {msg}")
+                stats["errors"].append(msg)
+                break
+
+            html = res.text
+            if not page_loaded:
+                page_loaded = True
+                max_page = self._parse_medal_max_page(html)
+                logger.info(f"[勋章] 列表共 {max_page + 1} 页")
+
+            page_medals = self._parse_medals(html)
+            for medal in page_medals:
+                all_medals.setdefault(medal["id"], medal)
+
+            stats["pages"] += 1
+            page_index += 1
+            if page_index <= max_page:
+                time.sleep(0.3)
+
+        if not page_loaded:
+            return all_medals
+
+        stats["total_medals"] = len(all_medals)
+        return all_medals
+
+    def _buy_medal(self, site_info: Dict, medal_id: int) -> Tuple[bool, str]:
+        """调用 ajax.php 购买/领取勋章"""
+        data = {
+            "action": "buyMedal",
+            "params[medal_id]": medal_id,
+        }
+        res = self._make_post_request(site_info, self.MEDAL_AJAX_PATH, data=data)
+        if res is None:
+            return False, "领取请求无响应"
+        if res.status_code != 200:
+            return False, f"HTTP {res.status_code}"
+
+        try:
+            result = res.json()
+        except Exception:
+            return False, f"响应解析失败: {(res.text or '')[:120]}"
+
+        ret = result.get("ret")
+        msg = result.get("msg") or result.get("message") or ""
+        if str(ret) == "0":
+            return True, msg or "领取成功"
+        return False, msg or f"ret={ret}"
+
+    def _run_medal_claim(self, site_info: Dict) -> Dict:
+        """自动领取所有可领取勋章（购买）"""
+        stats = {
+            "pages": 0,
+            "total_medals": 0,
+            "claimable_count": 0,
+            "claimed_count": 0,
+            "claimed_names": [],
+            "failed": [],
+            "errors": [],
+            "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        logger.info("[勋章] 获取勋章列表...")
+        all_medals = self._fetch_all_medals(site_info, stats)
+        if not all_medals:
+            stats["errors"].append("未解析到任何勋章")
+            stats["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logger.warning("[勋章] 未解析到任何勋章")
+            return stats
+
+        claimable = sorted(
+            [m for m in all_medals.values() if m["claimable"]],
+            key=lambda m: m["id"],
+        )
+        stats["claimable_count"] = len(claimable)
+        logger.info(
+            f"[勋章] 共 {stats['total_medals']} 枚，可领取 {len(claimable)} 枚"
+        )
+        if not claimable:
+            logger.info("[勋章] 没有可领取的勋章")
+
+        for medal in claimable:
+            logger.info(
+                f"[勋章] 领取: {medal['name']} (ID={medal['id']}, "
+                f"价格={medal['price'] or '未知'}, 加成={medal['bonus'] or '未知'})"
+            )
+            success, msg = self._buy_medal(site_info, medal["id"])
+            if success:
+                stats["claimed_count"] += 1
+                stats["claimed_names"].append(medal["name"])
+                logger.info(f"[勋章] ✅ 领取成功: {medal['name']} - {msg}")
+            else:
+                stats["failed"].append({"name": medal["name"], "id": medal["id"], "msg": msg})
+                logger.warning(f"[勋章] ❌ 领取失败: {medal['name']} - {msg}")
+                if any(k in msg for k in ["登录", "权限", "Cookie", "cookie", "签到"]):
+                    stats["errors"].append(f"登录状态异常，提前停止: {msg}")
+                    break
+            time.sleep(self.MEDAL_DELAY)
+
+        stats["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 按天累计领取结果
+        date_key = self._today_key("medal_stats")
+        today_stats = self.get_data(date_key) or {}
+        today_names = list(today_stats.get("claimed_names", []))
+        for name in stats["claimed_names"]:
+            if name not in today_names:
+                today_names.append(name)
+        self.save_data(date_key, {
+            "claimed_count": today_stats.get("claimed_count", 0) + stats["claimed_count"],
+            "claimed_names": today_names,
+            "total_medals": stats["total_medals"],
+            "claimable_count": stats["claimable_count"],
+            "last_run": stats["end_time"],
+            "errors": stats["errors"],
+        })
+
+        logger.info(
+            f"[勋章] 本次完成：领取 {stats['claimed_count']}/{stats['claimable_count']} 枚，"
+            f"失败 {len(stats['failed'])} 枚"
+        )
+        return stats
+
     # ==================== 统一调度 ====================
 
-    def _run_immediate(self, do_lottery: bool = False, do_redpacket: bool = False, do_task: bool = False):
+    def _run_immediate(self, do_lottery: bool = False, do_redpacket: bool = False,
+                       do_task: bool = False, do_medal: bool = False):
         """「立即」按钮调度入口，只执行被点击的模块"""
         try:
-            self.__run_immediate_inner(do_lottery, do_redpacket, do_task)
+            self.__run_immediate_inner(do_lottery, do_redpacket, do_task, do_medal)
         except Exception as e:
             logger.error(f"躺平PT助手执行异常: {str(e)}")
             traceback.print_exc()
 
-    def __run_immediate_inner(self, do_lottery: bool, do_redpacket: bool, do_task: bool):
+    def __run_immediate_inner(self, do_lottery: bool, do_redpacket: bool,
+                              do_task: bool, do_medal: bool = False):
         logger.info("=" * 50)
         logger.info(
             f"躺平PT助手 立即执行: "
             f"抽奖={'✅' if do_lottery else '❌'} "
             f"红包={'✅' if do_redpacket else '❌'} "
-            f"任务={'✅' if do_task else '❌'}"
+            f"任务={'✅' if do_task else '❌'} "
+            f"勋章={'✅' if do_medal else '❌'}"
         )
 
         try:
@@ -941,6 +1220,7 @@ class TangPingHelper(_PluginBase):
         redpacket_stats = None
         lottery_stats = None
         task_stats = None
+        medal_stats = None
 
         if do_redpacket:
             logger.info("[红包] 立即领取...")
@@ -966,14 +1246,25 @@ class TangPingHelper(_PluginBase):
                 logger.error(f"[任务] 异常: {str(e)}")
                 traceback.print_exc()
 
-        if self._notify and (redpacket_stats or lottery_stats or task_stats):
-            self._send_notification(site_name, redpacket_stats, lottery_stats, task_stats)
+        if do_medal:
+            logger.info("[勋章] 立即领取...")
+            try:
+                medal_stats = self._run_medal_claim(site_info)
+            except Exception as e:
+                logger.error(f"[勋章] 异常: {str(e)}")
+                traceback.print_exc()
+
+        if self._notify and (redpacket_stats or lottery_stats or task_stats or medal_stats):
+            self._send_notification(
+                site_name, redpacket_stats, lottery_stats, task_stats, medal_stats
+            )
 
         logger.info("躺平PT助手 立即执行完成")
         logger.info("=" * 50)
 
     def _send_notification(self, site_name: str, redpacket_stats: Dict = None,
-                           lottery_stats: Dict = None, task_stats: Dict = None):
+                           lottery_stats: Dict = None, task_stats: Dict = None,
+                           medal_stats: Dict = None):
         """组装并发送通知消息"""
         parts = [f"【躺平PT助手】{site_name}\n"]
 
@@ -1015,6 +1306,22 @@ class TangPingHelper(_PluginBase):
                 parts.append(f"  · 错误: {'; '.join(ts['errors'][:3])}")
             else:
                 parts.append(f"  · 状态: {ts.get('message', '无可领取任务')}")
+
+        if medal_stats:
+            ms = medal_stats
+            parts.append("🏅 勋章领取:")
+            parts.append(f"  · 本次领取: {ms.get('claimed_count', 0)} 枚")
+            parts.append(f"  · 可领取: {ms.get('claimable_count', 0)} 枚")
+            parts.append(f"  · 勋章总数: {ms.get('total_medals', 0)} 枚")
+            if ms.get("claimed_names"):
+                parts.append(f"  · 已领取: {'、'.join(ms['claimed_names'][:5])}")
+            if ms.get("failed"):
+                first_fail = ms["failed"][0]
+                parts.append(
+                    f"  · 失败: {len(ms['failed'])} 枚（{first_fail.get('name')}: {first_fail.get('msg')}）"
+                )
+            if ms.get("errors"):
+                parts.append(f"  · 错误: {'; '.join(ms['errors'][:3])}")
 
         text = "\n".join(parts)
         self.post_message(
@@ -1078,6 +1385,17 @@ class TangPingHelper(_PluginBase):
                     "func": self.run_task_service,
                     "kwargs": {}
                 })
+        # 勋章
+        if self._enabled_medal:
+            trigger = self._parse_cron(self._cron_medal)
+            if trigger:
+                services.append({
+                    "id": "TangPingHelper.Medal",
+                    "name": "躺平PT-自动领勋章",
+                    "trigger": trigger,
+                    "func": self.run_medal_service,
+                    "kwargs": {}
+                })
         return services
 
     def run_lottery_service(self):
@@ -1091,6 +1409,10 @@ class TangPingHelper(_PluginBase):
     def run_task_service(self):
         """定时服务：任务"""
         self._run_single("任务", self._run_task_claim)
+
+    def run_medal_service(self):
+        """定时服务：勋章"""
+        self._run_single("勋章", self._run_medal_claim)
 
     def _run_single(self, name: str, func):
         """执行单个模块并发送通知"""
@@ -1111,7 +1433,7 @@ class TangPingHelper(_PluginBase):
             traceback.print_exc()
             stats = {"errors": [str(e)]}
         if self._notify and stats:
-            _key_map = {"抽奖": "lottery", "红包": "redpacket", "任务": "task"}
+            _key_map = {"抽奖": "lottery", "红包": "redpacket", "任务": "task", "勋章": "medal"}
             kwargs = {f"{_key_map.get(name, name)}_stats": stats}
             self._send_notification(site_info.get("name", "躺平PT"), **kwargs)
         logger.info(f"[{name}] 定时任务完成")
@@ -1336,6 +1658,52 @@ class TangPingHelper(_PluginBase):
                             },
                         ]
                     },
+                    # 第五排：自动领勋章 | 勋章周期 | 立即领勋章
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 3},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'enabled_medal',
+                                            'label': '自动领勋章',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 6},
+                                'content': [
+                                    {
+                                        'component': 'VCronField',
+                                        'props': {
+                                            'model': 'cron_medal',
+                                            'label': '领勋章周期',
+                                            'placeholder': '留空则不定时执行',
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {'cols': 12, 'md': 3},
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'onlyonce_medal',
+                                            'label': '立即领勋章',
+                                        }
+                                    }
+                                ]
+                            },
+                        ]
+                    },
 
                     # 说明
                     {
@@ -1353,9 +1721,11 @@ class TangPingHelper(_PluginBase):
                                             'density': 'compact',
                                             'text': '自动匹配 tangpt.top 站点（需先在站点管理中配置）。'
                                                     '抽奖默认每6h执行一次（0 */6 * * *），红包默认每10min执行一次（*/10 * * * *），'
-                                                    '任务默认每6h执行一次（0 */6 * * *），留空则不定时执行。'
+                                                    '任务默认每6h执行一次（0 */6 * * *），勋章默认每天9点执行一次（0 9 * * *），'
+                                                    '留空则不定时执行。'
                                                     '抽奖固定循环至次数用完（间隔5s）；红包循环领取至无红包；'
-                                                    '任务距今日结束≥2h可领，月末 BUG>VIP>苍蝇腿，平时只领苍蝇腿。'
+                                                    '任务距今日结束≥2h可领，月末 BUG>VIP>苍蝇腿，平时只领苍蝇腿；'
+                                                    '勋章会遍历全部分页，领取所有可领取（含购买）的勋章。'
                                         }
                                     }
                                 ]
@@ -1370,12 +1740,15 @@ class TangPingHelper(_PluginBase):
             "enabled_lottery": False,
             "enabled_redpacket": False,
             "enabled_task": False,
+            "enabled_medal": False,
             "cron_lottery": "0 */6 * * *",
             "cron_task": "0 */6 * * *",
             "cron_redpacket": "*/10 * * * *",
+            "cron_medal": "0 9 * * *",
             "onlyonce_lottery": False,
             "onlyonce_redpacket": False,
             "onlyonce_task": False,
+            "onlyonce_medal": False,
         }
 
     # ==================== 统计详情页面 ====================
@@ -1386,8 +1759,9 @@ class TangPingHelper(_PluginBase):
         redpacket_data = self.get_data(f"redpacket_stats_{date_str}") or {}
         lottery_data = self.get_data(f"lottery_stats_{date_str}") or {}
         task_data = self.get_data(f"task_stats_{date_str}") or {}
+        medal_data = self.get_data(f"medal_stats_{date_str}") or {}
 
-        if not any([redpacket_data, lottery_data, task_data]):
+        if not any([redpacket_data, lottery_data, task_data, medal_data]):
             return [{
                 'component': 'VAlert',
                 'props': {
@@ -1434,6 +1808,35 @@ class TangPingHelper(_PluginBase):
                 {'label': '返回消息', 'value': ts.get('message', '-'), 'color': '#94a3b8'},
                 {'label': '领取时间', 'value': ts.get('claim_time', '-'), 'color': '#94a3b8'},
             ]))
+
+        # ── 勋章模块 ──
+        if medal_data:
+            md = medal_data
+            page.append(self._section_header('🏅', '勋章领取', '#eab308'))
+            page.append(self._metric_grid([
+                {'label': '今日领取', 'value': str(md.get('claimed_count', 0)), 'unit': '枚', 'color': '#eab308'},
+                {'label': '可领取', 'value': str(md.get('claimable_count', 0)), 'unit': '枚', 'color': '#22c55e'},
+                {'label': '勋章总数', 'value': str(md.get('total_medals', 0)), 'unit': '枚', 'color': '#0ea5e9'},
+                {'label': '最后执行', 'value': md.get('last_run', '-'), 'color': '#94a3b8'},
+            ]))
+            names = md.get('claimed_names', [])
+            if names:
+                page.append({
+                    'component': 'VRow',
+                    'content': [{
+                        'component': 'VCol', 'props': {'cols': 12},
+                        'content': [{
+                            'component': 'div',
+                            'props': {'class': 'text-caption text-grey mb-1'},
+                            'text': '今日已领取勋章'
+                        }] + [{
+                            'component': 'VChip',
+                            'props': {'color': 'grey-lighten-4', 'size': 'small',
+                                      'variant': 'flat', 'class': 'mr-2 mb-1'},
+                            'text': name
+                        } for name in names[:30]]
+                    }]
+                })
 
         # ── 抽奖模块 ──
         if lottery_data:
