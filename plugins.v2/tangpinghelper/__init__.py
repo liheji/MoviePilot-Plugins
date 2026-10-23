@@ -23,7 +23,7 @@ class TangPingHelper(_PluginBase):
     plugin_name = "躺平PT助手"
     plugin_desc = "躺平PT自动领红包、抽奖累加器、任务与勋章领取。\n支持自动领取红包、循环抽奖、智能任务领取、自动领取魔力加成≥0的可领取勋章，各功能独立开关与定时，每日统计数据按天清除。"
     plugin_icon = "tangping.png"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.4"
     plugin_author = "yilee"
     author_url = "https://github.com/yilee"
     plugin_config_prefix = "tangpinghelper_"
@@ -33,6 +33,15 @@ class TangPingHelper(_PluginBase):
     # ==================== 常量 ====================
     REDPACKET_LATEST_PATH = "/api/redpacket/latest"
     REDPACKET_CLAIM_PATH = "/api/redpacket/claim"
+    REDPACKET_DAILY_LIMIT_KEYWORDS = (
+        "每天最多领", "每日领取上限", "今日领取上限", "今日上限",
+        "每日上限", "超过领取上限", "今天最多领",
+        "今日领取红包已达上限", "每天领取上限",
+    )
+    REDPACKET_SKIP_KEYWORDS = (
+        "已经领取", "已领取", "抢完", "领完", "已过期",
+        "不存在", "已售罄", "没有剩余", "已达上限",
+    )
     LOTTERY_PAGE_PATH = "/omnibot_lottery.php"
     LOTTERY_DRAW_PATH = "/web/omnibot/lottery/draw"
     LOTTERY_DELAY = 5  # 固定每轮间隔（秒）
@@ -268,6 +277,28 @@ class TangPingHelper(_PluginBase):
         """从服务端上限消息中提取每日最大数量，如 '每天最多领100个' → 100"""
         m = re.search(r'每天最多领\s*(\d+)\s*个', msg)
         return int(m.group(1)) if m else None
+
+    @classmethod
+    def _is_redpacket_daily_limit(cls, msg: str) -> bool:
+        """判断消息是否为每日领取上限，而非单个红包抢完"""
+        if not msg:
+            return False
+        if any(
+            keyword in msg for keyword in cls.REDPACKET_DAILY_LIMIT_KEYWORDS
+        ):
+            return True
+        return (
+            ("今日" in msg or "今天" in msg or "每天" in msg)
+            and "领取" in msg
+            and "上限" in msg
+        )
+
+    @classmethod
+    def _is_redpacket_unavailable(cls, msg: str) -> bool:
+        """判断单个红包是否已抢完、已领取或已过期"""
+        return bool(msg) and any(
+            keyword in msg for keyword in cls.REDPACKET_SKIP_KEYWORDS
+        )
 
     def _today_key(self, prefix: str) -> str:
         """生成按天的存储键"""
@@ -558,6 +589,24 @@ class TangPingHelper(_PluginBase):
         total_magic = today_stats.get("total_magic", 0)
         daily_limit = today_stats.get("daily_limit_reached", False)
         daily_max = today_stats.get("daily_max", 0)
+        limit_reason = today_stats.get("limit_reason", "")
+
+        # 旧版本把“红包已经抢完”等 422 误记为每日上限，自动清理
+        if daily_limit and not self._is_redpacket_daily_limit(limit_reason):
+            logger.warning(
+                f"[红包] 检测到无效上限标记（{limit_reason or '无原因'}），自动重置"
+            )
+            daily_limit = False
+            daily_max = 0
+            limit_reason = ""
+            self.save_data(date_key, {
+                "claimed_count": claimed_count,
+                "total_magic": total_magic,
+                "daily_limit_reached": False,
+                "daily_max": 0,
+                "limit_reason": "",
+                "last_run": today_stats.get("last_run", ""),
+            })
 
         # 今日已达上限（标记 / 累计达服务端上限 / 累计达100——脏数据恢复兜底）
         limit_reached = daily_limit or (daily_max > 0 and claimed_count >= daily_max) or claimed_count >= 100
@@ -570,20 +619,21 @@ class TangPingHelper(_PluginBase):
                     "total_magic": total_magic,
                     "daily_limit_reached": True,
                     "daily_max": claimed_count,
-                    "limit_reason": today_stats.get("limit_reason", ""),
+                    "limit_reason": limit_reason,
                     "last_run": today_stats.get("last_run", ""),
                 })
             return {
                 "claimed_count": claimed_count,
                 "total_magic": total_magic,
                 "daily_limit_reached": True,
-                "limit_reason": today_stats.get("limit_reason", ""),
+                "limit_reason": limit_reason,
                 "last_run": today_stats.get("last_run", ""),
                 "errors": [],
             }
 
         max_rounds = 50  # 安全上限，避免无限循环
         round_num = 0
+        skipped_packet_ids = set()
 
         while round_num < max_rounds and not daily_limit:
             round_num += 1
@@ -619,6 +669,13 @@ class TangPingHelper(_PluginBase):
             if not isinstance(items, list) or len(items) == 0:
                 logger.info("[红包] 红包列表为空，结束查询")
                 break
+            items = [
+                item for item in items
+                if item.get("id") not in skipped_packet_ids
+            ]
+            if not items:
+                logger.info("[红包] 当前无可用红包，结束查询")
+                break
 
             # 2. 取第一个红包领取
             packet = items[0]
@@ -640,18 +697,31 @@ class TangPingHelper(_PluginBase):
 
             # 3. 处理领取结果
             if claim_res.status_code == 422:
-                # 每日上限（HTTP 422）
                 try:
                     resp_data = claim_res.json()
-                    limit_msg = resp_data.get("message", "每日上限（HTTP 422）")
+                    resp_msg = resp_data.get("message") or resp_data.get("msg") or ""
                 except Exception:
-                    limit_msg = "每日上限（HTTP 422）"
-                logger.warning(f"[红包] 每日上限已达到: {limit_msg}")
-                stats["daily_limit_reached"] = True
-                stats["limit_reason"] = limit_msg
-                stats["daily_max"] = self._parse_daily_max(limit_msg) or 100
-                daily_limit = True
-                break
+                    resp_msg = ""
+
+                if self._is_redpacket_daily_limit(resp_msg):
+                    logger.warning(f"[红包] 每日上限已达到: {resp_msg}")
+                    stats["daily_limit_reached"] = True
+                    stats["limit_reason"] = resp_msg
+                    stats["daily_max"] = self._parse_daily_max(resp_msg) or 100
+                    daily_limit = True
+                    break
+
+                logger.info(
+                    f"[红包] 红包 {packet_id} 不可领取: "
+                    f"{resp_msg or 'HTTP 422'}，跳过"
+                )
+                skipped_packet_ids.add(packet_id)
+                if not self._is_redpacket_unavailable(resp_msg):
+                    stats["errors"].append(
+                        f"领取失败: {resp_msg or 'HTTP 422'}"
+                    )
+                time.sleep(1.2)
+                continue
 
             if claim_res.status_code != 200:
                 msg = f"领取红包 {packet_id} 失败：HTTP {claim_res.status_code}"
@@ -685,15 +755,16 @@ class TangPingHelper(_PluginBase):
                 msg = claim_data.get("message", "")
                 logger.info(f"[红包] ⚠️ 领取返回异常: {msg}")
 
-                if "每天最多领" in msg:
+                if self._is_redpacket_daily_limit(msg):
                     stats["daily_limit_reached"] = True
                     stats["limit_reason"] = msg
                     stats["daily_max"] = self._parse_daily_max(msg) or 100
                     daily_limit = True
                     break
 
-                if any(kw in msg for kw in ["已经领取", "已达上限", "已过期"]):
-                    logger.info(f"[红包] 红包 {packet_id} 已处理，继续下一轮")
+                if self._is_redpacket_unavailable(msg):
+                    logger.info(f"[红包] 红包 {packet_id} 已处理，跳过")
+                    skipped_packet_ids.add(packet_id)
                 else:
                     stats["errors"].append(f"领取失败: {msg}")
                     break
@@ -712,8 +783,9 @@ class TangPingHelper(_PluginBase):
         self.save_data(date_key, {
             "claimed_count": claimed_count,
             "total_magic": total_magic,
-            "daily_limit_reached": today_stats.get("daily_limit_reached", False) or stats["daily_limit_reached"],
-            "daily_max": stats.get("daily_max") or today_stats.get("daily_max", 0),
+            "daily_limit_reached": daily_limit or stats["daily_limit_reached"],
+            "daily_max": stats.get("daily_max") or daily_max,
+            "limit_reason": stats.get("limit_reason") or limit_reason,
             "last_run": stats["last_run"],
         })
 
@@ -1827,7 +1899,17 @@ class TangPingHelper(_PluginBase):
         # ── 红包模块 ──
         if redpacket_data:
             rp = redpacket_data
-            limit_reached = rp.get('daily_limit_reached') or (rp.get('daily_max', 0) > 0 and rp.get('claimed_count', 0) >= rp.get('daily_max', 0)) or rp.get('claimed_count', 0) >= 100
+            claimed = rp.get('claimed_count', 0)
+            daily_max = rp.get('daily_max', 0)
+            limit_flag_valid = (
+                rp.get('daily_limit_reached')
+                and self._is_redpacket_daily_limit(rp.get('limit_reason', ''))
+            )
+            limit_reached = (
+                limit_flag_valid
+                or (daily_max > 0 and claimed >= daily_max)
+                or claimed >= 100
+            )
             limit_text = '已达上限' if limit_reached else '正常'
             limit_color = '#ef4444' if limit_reached else '#22c55e'
 
