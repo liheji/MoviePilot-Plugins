@@ -24,8 +24,8 @@ class TangPingHelper(_PluginBase):
     plugin_desc = "躺平PT自动领红包、抽奖累加器、任务与勋章领取。\n支持自动领取红包、循环抽奖、智能任务领取、自动领取魔力加成≥0的可领取勋章，各功能独立开关与定时，每日统计数据按天清除。"
     plugin_icon = "tangping.png"
     plugin_version = "1.1.4"
-    plugin_author = "yilee"
-    author_url = "https://github.com/yilee"
+    plugin_author = "liheji"
+    author_url = "https://github.com/liheji"
     plugin_config_prefix = "tangpinghelper_"
     plugin_order = 20
     auth_level = 2

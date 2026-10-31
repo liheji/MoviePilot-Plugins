@@ -47,8 +47,8 @@ class TjuptHelper(_PluginBase):
     )
     plugin_icon = "Tjupt_A.png"
     plugin_version = "1.2.0"
-    plugin_author = "yilee"
-    author_url = "https://github.com/yilee"
+    plugin_author = "liheji"
+    author_url = "https://github.com/liheji"
     plugin_config_prefix = "tjupthelper_"
     plugin_order = 30
     auth_level = 2

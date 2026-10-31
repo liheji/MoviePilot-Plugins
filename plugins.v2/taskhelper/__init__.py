@@ -37,8 +37,8 @@ class TaskHelper(_PluginBase):
     )
     plugin_icon = "PTHelper_A.png"
     plugin_version = "1.1.7"
-    plugin_author = "yilee"
-    author_url = "https://github.com/yilee"
+    plugin_author = "liheji"
+    author_url = "https://github.com/liheji"
     plugin_config_prefix = "taskhelper_"
     plugin_order = 20
     auth_level = 2
