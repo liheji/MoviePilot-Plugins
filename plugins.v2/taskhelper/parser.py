@@ -8,6 +8,7 @@ from lxml import etree
 
 TASK_PATH = "/task.php"
 BONUS_PATH = "/mybonus.php"
+CLAIMABLE_STATE = "直接领取"
 CLAIMED_WORDS = ("已经认领", "已认领", "已领取", "已完成")
 OPEN_WORDS = ("领取", "认领", "申请", "开始")
 METRIC_LABELS = (
@@ -253,7 +254,10 @@ def _check(name: str, value: str, ok: Optional[bool]) -> Dict:
 
 
 def evaluate_task(task: Dict, hourly_magic: float, now: datetime,
-                  user_level: str = "", join_days: Optional[int] = None) -> str:
+                  user_level: str = "", join_days: Optional[int] = None,
+                  ignore_capacity: bool = False,
+                  ignore_claimed: bool = False,
+                  require_action: bool = True) -> str:
     start = _parse_dt(task.get("start", ""))
     end = _parse_dt(task.get("end", ""))
     if not start or not end:
@@ -304,7 +308,7 @@ def evaluate_task(task: Dict, hourly_magic: float, now: datetime,
         checks.append(_check("最低时魔", f"{minimum:g}/h", hourly_ok))
 
     task["checks"] = checks
-    if task.get("claimed"):
+    if task.get("claimed") and not ignore_claimed:
         task["reason"] = "该任务已被你领取"
         return "已领取"
     if time_ok is False:
@@ -334,7 +338,7 @@ def evaluate_task(task: Dict, hourly_magic: float, now: datetime,
                 "未获取到你的注册时间"
             )
             return "注册天数未获取"
-    if capacity_ok is False:
+    if capacity_ok is False and not ignore_capacity:
         task["reason"] = f"认领名额已满（{claimants}）"
         return "认领已满"
     if minimum is not None:
@@ -347,13 +351,13 @@ def evaluate_task(task: Dict, hourly_magic: float, now: datetime,
         if hourly_check["ok"] is None:
             task["reason"] = f"要求基础时魔 ≥ {minimum:g}/h，未获取到基础时魔"
             return "时魔未获取"
-    if not task.get("claimable"):
+    if require_action and not task.get("claimable"):
         task["reason"] = (
             f"任务页未提供可用的领取入口（{task.get('action_text') or '无操作按钮'}）"
         )
         return "不可领取"
-    task["reason"] = "全部条件满足，点击前往任务页领取"
-    return "去领取"
+    task["reason"] = "全部条件满足，可直接领取"
+    return CLAIMABLE_STATE
 
 
 def task_state(task: Dict, hourly_magic: float, now: datetime,
@@ -368,9 +372,9 @@ def apply_site_lock(tasks: List[Dict]) -> List[Dict]:
             if not task.get("claimed"):
                 task["state"] = "本站已领取"
                 task["reason"] = "本站已领取其他任务，每站同时只能进行一个任务"
-                task.setdefault("checks", []).append(
-                    _check("", "已有任务被领取", False)
-                )
+                checks = task.setdefault("checks", [])
+                if not any(item.get("value") == "已有任务被领取" for item in checks):
+                    checks.append(_check("", "已有任务被领取", False))
     return tasks
 
 
@@ -434,15 +438,25 @@ def _task_from_row(row, headers: Dict[str, int], header_values: List[str],
     target = text_of(_cell(cells, headers, "目标用户")) if _cell(cells, headers, "目标用户") is not None else ""
     registered_days_min, registered_days_max = _registration_condition(target)
 
-    action = next(iter(action_cell.xpath(
-        ".//button|.//input[@type='button']|.//a"
-    )), None)
+    action = next((
+        node for node in action_cell.xpath(".//input[@type='button']")
+        if (node.get("data-id") or "").isdigit()
+    ), None)
+    if action is None:
+        action = next(iter(action_cell.xpath(
+            ".//button|.//input[@type='button']|.//a"
+        )), None)
+    exam_id = (
+        int(action.get("data-id"))
+        if action is not None and (action.get("data-id") or "").isdigit()
+        else None
+    )
     action_text = (text_of(action) or action.get("value", "")) if action is not None else ""
     disabled = action is None or action.get("disabled") is not None or (
         "disabled" in (action.get("class") or "") if action is not None else False
     )
     claimed = any(word in action_text for word in CLAIMED_WORDS)
-    claimable = not disabled and not claimed and any(
+    claimable = exam_id is not None and not disabled and not claimed and any(
         word in action_text for word in OPEN_WORDS
     )
 
@@ -494,6 +508,7 @@ def _task_from_row(row, headers: Dict[str, int], header_values: List[str],
             if _cell(cells, headers, "描述") is not None else ""
         ),
         "action_text": action_text,
+        "exam_id": exam_id,
         "claimed": claimed,
         "claimable": claimable,
         "categories": categories,

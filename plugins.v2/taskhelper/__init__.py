@@ -15,7 +15,7 @@ from app.utils.http import RequestUtils
 
 from .parser import (
     BONUS_PATH,
-    TASK_PATH,
+    CLAIMABLE_STATE,
     apply_site_lock,
     evaluate_task,
     format_amount,
@@ -31,12 +31,12 @@ from .sites import TASK_SITE_HANDLERS
 class TaskHelper(_PluginBase):
     plugin_name = "PT任务助手"
     plugin_desc = (
-        "按站点定时只读抓取任务，完整展示指标、时间、目标用户、认领人数、奖惩与描述。"
+        "按站点定时抓取任务，完整展示指标、时间、目标用户、认领人数、奖惩与描述。"
         "任务按做种积分、发种、上传&下载分类，站点适配优先、NexusPHP Base 兜底；"
-        "插件不提交领取请求。"
+        "支持直接领取和每站唯一默认任务定时领取。"
     )
     plugin_icon = "PTHelper_A.png"
-    plugin_version = "1.1.7"
+    plugin_version = "1.2.0"
     plugin_author = "liheji"
     author_url = "https://github.com/liheji"
     plugin_config_prefix = "taskhelper_"
@@ -48,8 +48,11 @@ class TaskHelper(_PluginBase):
     _enabled: bool = False
     _onlyonce: bool = False
     _cron: str = "0 */6 * * *"
+    _default_claim_cron: str = "*/30 * * * *"
+    _default_claims: Dict[str, Dict[str, Any]] = {}
     _site_ids: List[Any] = []
     _timeout: int = 20
+    TASK_AJAX_PATH = "/ajax.php"
 
     def init_plugin(self, config: dict = None):
         self.stop_service()
@@ -57,6 +60,8 @@ class TaskHelper(_PluginBase):
         self._enabled = bool(config.get("enabled"))
         self._onlyonce = bool(config.get("onlyonce"))
         self._cron = config.get("cron") or "0 */6 * * *"
+        self._default_claim_cron = config.get("default_claim_cron") or ""
+        self._default_claims = config.get("default_claims") or {}
         self._site_ids = config.get("site_ids") or []
         self._timeout = int(config.get("timeout") or 20)
 
@@ -82,7 +87,24 @@ class TaskHelper(_PluginBase):
         return self._enabled
 
     def get_api(self) -> List[Dict[str, Any]]:
-        return []
+        return [
+            {
+                "path": "/claim_task",
+                "endpoint": self.claim_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "直接领取指定任务",
+                "description": "重新校验任务 ID、站点及领取条件后直接提交领取",
+            },
+            {
+                "path": "/default_task",
+                "endpoint": self.set_default_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "设置或取消站点默认任务",
+                "description": "只保存或取消默认任务配置，不提交站点领取请求",
+            },
+        ]
 
     def stop_service(self):
         try:
@@ -95,24 +117,38 @@ class TaskHelper(_PluginBase):
             logger.error(f"[任务助手] 停止服务失败：{err}")
 
     def get_service(self) -> List[Dict[str, Any]]:
+        jobs = []
         if self._enabled and self._cron:
             try:
-                return [{
+                jobs.append({
                     "id": "TaskHelper",
                     "name": "PT任务助手-定时抓取",
                     "trigger": CronTrigger.from_crontab(self._cron),
                     "func": self.refresh,
                     "kwargs": {},
-                }]
+                })
             except ValueError as err:
                 logger.error(f"[任务助手] Cron 配置无效：{err}")
-        return []
+        if self._enabled and self._default_claim_cron:
+            try:
+                jobs.append({
+                    "id": "TaskHelperDefaultClaim",
+                    "name": "PT任务助手-默认任务领取",
+                    "trigger": CronTrigger.from_crontab(self._default_claim_cron),
+                    "func": self.run_default_claims,
+                    "kwargs": {},
+                })
+            except ValueError as err:
+                logger.error(f"[任务助手] 默认领取 Cron 配置无效：{err}")
+        return jobs
 
     def __update_config(self):
         self.update_config({
             "enabled": self._enabled,
             "onlyonce": self._onlyonce,
             "cron": self._cron,
+            "default_claim_cron": self._default_claim_cron,
+            "default_claims": self._default_claims,
             "site_ids": self._site_ids,
             "timeout": self._timeout,
         })
@@ -162,6 +198,316 @@ class TaskHelper(_PluginBase):
             )
             return None
         return response.text
+
+    @staticmethod
+    def _sites_by_id() -> Dict[str, Dict]:
+        return {
+            str(site.get("id")): site
+            for site in SitesHelper().get_indexers()
+        }
+
+    @staticmethod
+    def _tasks_with_id(tasks: List[Dict], task_id: Any) -> List[Dict]:
+        try:
+            wanted = int(task_id)
+        except (TypeError, ValueError):
+            return []
+        return [
+            task for task in tasks
+            if task.get("exam_id") is not None
+            and int(task["exam_id"]) == wanted
+        ]
+
+    @classmethod
+    def _task_by_id(cls, tasks: List[Dict], task_id: Any) -> Optional[Dict]:
+        matches = cls._tasks_with_id(tasks, task_id)
+        return matches[0] if len(matches) == 1 else None
+
+    def _default_condition(self, task: Dict, data: Dict,
+                           now: Optional[datetime] = None) -> Tuple[str, str]:
+        """Return current default eligibility without claim-state constraints."""
+        now = now or self._now().replace(tzinfo=None)
+        hourly = data.get("hourly_magic") or 0
+        user_level = data.get("user_level") or ""
+        join_days = data.get("join_days")
+        candidate = dict(task)
+        candidate["checks"] = list(task.get("checks") or [])
+        state = evaluate_task(
+            candidate, hourly, now, user_level, join_days,
+            ignore_capacity=True,
+            ignore_claimed=True,
+            require_action=False,
+        )
+        return state, candidate.get("reason") or state
+
+    def _fetch_site_tasks(self, site: Dict) -> List[Dict]:
+        """Refetch the task page so an old task ID can never receive a new task."""
+        site_id = str(site.get("id"))
+        previous = self.get_data(f"site_{site_id}") or {}
+        handler = self._handler_for(site.get("url") or "")
+        html = self._get_page(site, handler.task_path)
+        if html is None:
+            return []
+        return handler.parse_tasks(
+            html,
+            self._now().replace(tzinfo=None),
+            previous.get("hourly_magic") or 0,
+            user_level=previous.get("user_level") or "",
+            join_days=previous.get("join_days"),
+        )
+
+    def _request_claim(self, site: Dict, exam_id: int) -> Tuple[bool, str]:
+        """Submit one claim with the verified numeric task ID."""
+        try:
+            wanted = int(exam_id)
+        except (TypeError, ValueError):
+            return False, "任务 ID 无效"
+        base = self._base_url(site)
+        response = RequestUtils(
+            cookies=site.get("cookie"),
+            ua=site.get("ua"),
+            proxies=settings.PROXY if site.get("proxy") else None,
+            timeout=self._timeout,
+        ).post_res(
+            url=urljoin(base + "/", self.TASK_AJAX_PATH.lstrip("/")),
+            data={"action": "claimTask", "params[exam_id]": wanted},
+        )
+        if response is None:
+            return False, "领取请求无响应"
+        if response.status_code != 200:
+            return False, f"领取请求失败：HTTP {response.status_code}"
+        try:
+            result = response.json()
+        except Exception as err:
+            return False, f"领取响应解析失败：{err}"
+        message = result.get("msg") or result.get("message") or ""
+        if result.get("ret") == 0:
+            logger.info(
+                f"[任务助手] {site.get('name')} 任务 ID={wanted} 领取成功："
+                f"{message or '无返回消息'}"
+            )
+            return True, message or "领取成功"
+        logger.warning(
+            f"[任务助手] {site.get('name')} 任务 ID={wanted} 领取失败："
+            f"ret={result.get('ret')} {message or '无返回消息'}"
+        )
+        return False, message or f"领取失败（ret={result.get('ret')}）"
+
+    def _save_feedback(self, success: bool, message: str,
+                       site_name: str = "", task_name: str = "") -> None:
+        self.save_data("last_action", {
+            "success": success,
+            "message": message,
+            "site_name": site_name,
+            "task_name": task_name,
+            "time": self._now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+    def _persist_default_claims(self) -> None:
+        self.__update_config()
+
+    def _mark_claimed(self, site_id: str, exam_id: int) -> None:
+        key = f"site_{site_id}"
+        data = self.get_data(key)
+        if not data:
+            return
+        tasks = data.get("tasks") or []
+        target = self._task_by_id(tasks, exam_id)
+        if not target:
+            return
+        target["claimed"] = True
+        target["claimable"] = False
+        target["state"] = "已领取"
+        target["reason"] = "该任务已被你领取"
+        apply_site_lock(tasks)
+        data["tasks"] = tasks
+        self.save_data(key, data)
+
+    def claim_api(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        site_name = ""
+        task_name = ""
+        try:
+            operation = data.get("action")
+            if operation != "claim":
+                message = f"操作类型不匹配：领取接口收到 {operation or '空操作'}"
+                logger.warning(f"[任务助手] {message}")
+                self._save_feedback(False, message)
+                return self._api_failure(message)
+            site_id = str(data.get("site_id") or "")
+            task_id = data.get("task_id")
+            if site_id not in {str(value) for value in self._site_ids}:
+                return self._api_failure("该站点不在当前插件站点列表中")
+            site = self._sites_by_id().get(site_id)
+            if not site:
+                return self._api_failure("未找到对应站点")
+            site_name = site.get("name") or site_id
+            tasks = self._fetch_site_tasks(site)
+            if len(self._tasks_with_id(tasks, task_id)) > 1:
+                message = f"任务 ID {task_id} 在当前页面重复，已拒绝领取以避免领错任务"
+                self._save_feedback(False, message, site_name)
+                return self._api_failure(message)
+            target = self._task_by_id(tasks, task_id)
+            if not target:
+                message = f"任务 ID {task_id} 不存在于站点当前任务页面，已拒绝领取"
+                self._save_feedback(False, message, site_name)
+                return self._api_failure(message)
+            task_name = target.get("name") or str(task_id)
+            if target.get("state") != CLAIMABLE_STATE:
+                message = (
+                    f"任务《{task_name}》当前不可直接领取："
+                    f"{target.get('reason') or target.get('state') or '条件不满足'}"
+                )
+                self._save_feedback(False, message, site_name, task_name)
+                return self._api_failure(message)
+            success, message = self._request_claim(site, target["exam_id"])
+            if success:
+                self._mark_claimed(site_id, target["exam_id"])
+            feedback = (
+                f"已直接领取《{task_name}》：{message}"
+                if success
+                else f"直接领取《{task_name}》失败：{message}"
+            )
+            self._save_feedback(success, feedback, site_name, task_name)
+            return {
+                "success": success,
+                "message": feedback,
+                "task_id": target["exam_id"],
+            }
+        except Exception as err:
+            logger.exception("[任务助手] 直接领取异常")
+            message = f"直接领取异常：{err}"
+            self._save_feedback(False, message, site_name, task_name)
+            return self._api_failure(message)
+
+    @staticmethod
+    def _api_failure(message: str) -> Dict[str, Any]:
+        return {"success": False, "message": message}
+
+    def set_default_api(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        operation = data.get("action")
+        if operation != "set_default":
+            message = f"操作类型不匹配：默认任务接口收到 {operation or '空操作'}"
+            logger.warning(f"[任务助手] {message}")
+            self._save_feedback(False, message)
+            return self._api_failure(message)
+        site_id = str(data.get("site_id") or "")
+        task_id = data.get("task_id")
+        site = self._sites_by_id().get(site_id)
+        site_data = self.get_data(f"site_{site_id}") or {}
+        current = self._default_claims.get(site_id)
+        current_id = current.get("task_id") if current else None
+        site_name = site_data.get("site_name") or (site or {}).get("name") or site_id
+        task_name = str(task_id)
+        if current_id is not None:
+            try:
+                same_as_current = int(current_id) == int(task_id)
+            except (TypeError, ValueError):
+                same_as_current = False
+            if same_as_current:
+                task_name = current.get("task_name") or str(task_id)
+                self._default_claims.pop(site_id, None)
+                self._persist_default_claims()
+                message = f"已取消《{task_name}》的默认任务（未提交领取）"
+                self._save_feedback(True, message, site_name, task_name)
+                return {"success": True, "message": message}
+        if current:
+            message = (
+                f"站点「{site_name}」已设置默认任务《{current.get('task_name') or current_id}」；"
+                "请先取消原默认任务，再设置其他任务"
+            )
+            self._save_feedback(False, message, site_name, task_name)
+            return self._api_failure(message)
+
+        tasks = site_data.get("tasks") or []
+        if site:
+            tasks = self._fetch_site_tasks(site)
+            if not tasks:
+                message = "无法重新获取站点任务页，暂不能设置默认领取"
+                self._save_feedback(False, message, site_name)
+                return self._api_failure(message)
+        matches = self._tasks_with_id(tasks, task_id)
+        if len(matches) > 1:
+            message = f"任务 ID {task_id} 重复，无法设置默认领取"
+            self._save_feedback(False, message, site_name)
+            return self._api_failure(message)
+        target = matches[0] if matches else None
+        if not target:
+            message = f"任务 ID {task_id} 不存在，无法设置默认领取"
+            self._save_feedback(False, message, site_name)
+            return self._api_failure(message)
+        default_state, default_reason = self._default_condition(target, site_data)
+        task_name = target.get("name") or str(task_id)
+        if default_state != CLAIMABLE_STATE:
+            message = (
+                f"任务《{task_name}》当前不满足默认领取条件："
+                f"{default_reason or '条件不满足'}"
+            )
+            self._save_feedback(False, message, site_name, task_name)
+            return self._api_failure(message)
+
+        self._default_claims[site_id] = {
+            "task_id": int(target["exam_id"]),
+            "task_name": task_name,
+        }
+        self._persist_default_claims()
+        message = (
+            f"已将《{task_name}》设为站点「{site_name}」的默认任务"
+            "（仅保存配置，未提交领取）"
+        )
+        logger.info(f"[任务助手] {message}")
+        self._save_feedback(True, message, site_name, task_name)
+        return {
+            "success": True,
+            "message": message,
+            "task_id": target["exam_id"],
+        }
+
+    def run_default_claims(self) -> Dict[str, int]:
+        """Run once per cron trigger; failures are intentionally not retried."""
+        summary = {"sites": 0, "attempted": 0, "claimed": 0, "failed": 0, "skipped": 0}
+        sites = self._sites_by_id()
+        selected = {str(site_id) for site_id in self._site_ids}
+        for site_id, default in self._default_claims.items():
+            site_id = str(site_id)
+            if site_id not in selected:
+                continue
+            site = sites.get(site_id)
+            if not site:
+                summary["skipped"] += 1
+                continue
+            summary["sites"] += 1
+            try:
+                task_id = default.get("task_id")
+                tasks = self._fetch_site_tasks(site)
+                target = self._task_by_id(tasks, task_id)
+                if not target or target.get("state") != CLAIMABLE_STATE:
+                    summary["skipped"] += 1
+                    continue
+                summary["attempted"] += 1
+                success, message = self._request_claim(site, target["exam_id"])
+                if success:
+                    summary["claimed"] += 1
+                    self._mark_claimed(site_id, target["exam_id"])
+                    logger.info(
+                        f"[任务助手] {site.get('name')} 默认任务《{target.get('name')}》"
+                        f"领取成功：{message}"
+                    )
+                else:
+                    summary["failed"] += 1
+                    logger.warning(
+                        f"[任务助手] {site.get('name')} 默认任务《{target.get('name')}》"
+                        f"领取失败，本次不重试：{message}"
+                    )
+            except Exception as err:
+                summary["failed"] += 1
+                logger.warning(
+                    f"[任务助手] {site.get('name')} 默认任务执行异常，本次不重试：{err}"
+                )
+        self.save_data("last_default_claim", {
+            **summary,
+            "updated": self._now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        return summary
 
     def _handler_for(self, url: str):
         for handler in self._site_schema:
@@ -278,7 +624,9 @@ class TaskHelper(_PluginBase):
             self.save_data(key, data)
             summary["sites"] += 1
             summary["tasks"] += len(tasks)
-            summary["actionable"] += sum(task["state"] == "去领取" for task in tasks)
+            summary["actionable"] += sum(
+                task["state"] == CLAIMABLE_STATE for task in tasks
+            )
             logger.info(
                 f"[任务助手] {data['site_name']}（{handler.__name__}）："
                 f"{len(tasks)} 个任务，时魔 "
@@ -318,8 +666,10 @@ class TaskHelper(_PluginBase):
                         self._field(12, "VSelect", "site_ids", "选择站点",
                                     items=sites, multiple=True, chips=True,
                                     variant="outlined"),
-                        self._field(12, cron_component, "cron", "抓取周期",
+                        self._field(6, cron_component, "cron", "任务抓取周期",
                                     placeholder="0 */6 * * *"),
+                        self._field(6, cron_component, "default_claim_cron",
+                                    "默认领取周期", placeholder="*/30 * * * *"),
                     ],
                 },
                 {
@@ -328,9 +678,10 @@ class TaskHelper(_PluginBase):
                         "type": "info",
                         "variant": "tonal",
                         "density": "compact",
-                        "text": "只读抓取 task.php 与 mybonus.php，不提交领取请求。"
-                                "站点适配器优先，未知站点使用 NexusPHP Base；"
-                                "判断时间、等级、注册天数、认领人数和最低时魔后提供任务页跳转。",
+                        "text": "抓取 task.php 与 mybonus.php；条件满足时可直接领取。"
+                                "每个站点最多设置一个默认领取任务，按默认领取周期执行。"
+                                "领取失败不重试，等待下一次周期；每月、每日或每小时任务"
+                                "按站点当前任务状态领取。",
                     },
                 },
             ],
@@ -338,6 +689,8 @@ class TaskHelper(_PluginBase):
             "enabled": False,
             "onlyonce": False,
             "cron": "0 */6 * * *",
+            "default_claim_cron": "*/30 * * * *",
+            "default_claims": {},
             "site_ids": [],
             "timeout": 20,
         }
@@ -367,10 +720,10 @@ class TaskHelper(_PluginBase):
             data = self.get_data(f"site_{site_id}")
             if not data:
                 continue
+            data["site_id"] = str(site_id)
             totals["sites"] += 1
             tasks = data.get("tasks") or []
             for task in tasks:
-                task["_site_url"] = data.get("site_url") or ""
                 task["state"] = evaluate_task(
                     task,
                     data.get("hourly_magic") or 0,
@@ -380,9 +733,11 @@ class TaskHelper(_PluginBase):
                 )
             apply_site_lock(tasks)
             totals["claimed"] += sum(task["state"] == "已领取" for task in tasks)
-            totals["actionable"] += sum(task["state"] == "去领取" for task in tasks)
+            totals["actionable"] += sum(
+                task["state"] == CLAIMABLE_STATE for task in tasks
+            )
             totals["tasks"] += len(tasks)
-            cards.append(self._site_card(data))
+            cards.append(self._site_card(data, now))
 
         last_run = self.get_data("last_run") or {}
         if not cards:
@@ -395,11 +750,31 @@ class TaskHelper(_PluginBase):
                 },
             }]
 
-        return [self._title("📋 PT任务助手"), self._stats(totals, last_run), *cards]
+        content = [self._title("📋 PT任务助手"), self._stats(totals, last_run)]
+        last_action = self.get_data("last_action")
+        if last_action:
+            content.append({
+                "component": "VSnackbar",
+                "props": {
+                    "model-value": True,
+                    "timeout": 5000,
+                    "location": "top",
+                    "color": "success" if last_action.get("success") else "error",
+                    "min-width": "320",
+                },
+                "content": [{
+                    "component": "span",
+                    "text": last_action.get("message") or "操作完成",
+                }],
+            })
+            self.save_data("last_action", None)
+        return [*content, *cards]
 
-    def _site_card(self, data: Dict) -> dict:
+    def _site_card(self, data: Dict, now: datetime) -> dict:
         hourly = data.get("hourly_magic") or 0
         hourly_text = f"{hourly:g}/h" if data.get("hourly_found") and hourly > 0 else "未获取"
+        site_id = str(data.get("site_id") or "")
+        default = self._default_claims.get(site_id)
         content = [{
             "component": "div",
             "props": {"class": "d-flex flex-wrap align-center ga-2 mb-3"},
@@ -416,6 +791,12 @@ class TaskHelper(_PluginBase):
                     else "等级 未获取",
                     "#0ea5e9" if data.get("user_level") else "#f59e0b",
                 ),
+                *([
+                    self._chip(
+                        f"默认领取 {default.get('task_name') or default.get('task_id')}",
+                        "green",
+                    )
+                ] if default else []),
             ],
         }]
         if data.get("error"):
@@ -425,17 +806,21 @@ class TaskHelper(_PluginBase):
                           "text": data["error"]},
             })
         for task in data.get("tasks") or []:
-            content.append(self._task_card(task))
+            default_state, default_reason = self._default_condition(task, data, now)
+            content.append(self._task_card(
+                task, site_id, default_state, default_reason,
+            ))
         return {
             "component": "VCard",
             "props": {"variant": "flat", "class": "mb-4 pa-4"},
             "content": content,
         }
 
-    def _task_card(self, task: Dict) -> dict:
+    def _task_card(self, task: Dict, site_id: str,
+                   default_state: str, default_reason: str) -> dict:
         state = task.get("state") or "未知"
         colors = {
-            "去领取": "#22c55e",
+            CLAIMABLE_STATE: "#22c55e",
             "已领取": "#64748b",
             "本站已领取": "#64748b",
             "时魔不足": "#f59e0b",
@@ -449,25 +834,110 @@ class TaskHelper(_PluginBase):
             "已结束": "#64748b",
             "不可领取": "#64748b",
         }
-        action_props = {
-            "color": "primary" if state == "去领取" else colors.get(state, "#64748b"),
-            "variant": "outlined" if state == "去领取" else "flat",
+        exam_id = task.get("exam_id")
+        current_default = self._default_claims.get(site_id)
+        is_default = bool(
+            current_default
+            and current_default.get("task_id") is not None
+            and exam_id is not None
+            and int(current_default["task_id"]) == int(exam_id)
+        )
+        claim_enabled = state == CLAIMABLE_STATE and exam_id is not None
+        default_enabled = is_default or (
+            not current_default
+            and default_state == CLAIMABLE_STATE
+            and exam_id is not None
+        )
+        claim_props = {
+            "color": "green" if claim_enabled else colors.get(state, "#64748b"),
+            "variant": "flat",
             "size": "small",
-            "disabled": state != "去领取",
+            "disabled": not claim_enabled,
+            "style": (
+                "background-color:#22c55e;color:#fff;"
+                if claim_enabled
+                else "background-color:{};color:#fff;opacity:0.65;".format(
+                    colors.get(state, "#64748b")
+                )
+            ),
         }
-        if state == "去领取":
-            action_props.update({
-                "href": f"{task.get('_site_url', '').rstrip('/')}{TASK_PATH}",
-                "target": "_blank",
-            })
+        default_props = {
+            "color": "deep-purple",
+            "variant": "outlined" if is_default else "flat",
+            "size": "small",
+            "disabled": not default_enabled,
+            "style": "" if is_default else (
+                "background-color:#7c3aed;color:#fff;"
+                if default_enabled
+                else "background-color:#7c3aed;color:#fff;opacity:0.65;"
+            ),
+        }
+        if claim_enabled:
+            claim_text = CLAIMABLE_STATE
+            claim_tip = task.get("reason") or "全部条件满足，可直接领取"
+        else:
+            claim_text = state
+            claim_tip = task.get("reason") or state
+        if is_default:
+            default_text = "取消默认"
+        elif current_default:
+            default_text = "已有默认任务"
+        elif exam_id is None:
+            default_text = "任务ID缺失"
+        elif not default_enabled:
+            default_text = default_state or "不可用"
+        else:
+            default_text = "设为默认"
+        if is_default:
+            default_tip = "取消后可为本站其他任务设置默认领取"
+        elif current_default:
+            default_tip = (
+                f"本站已有默认任务《{current_default.get('task_name') or current_default.get('task_id')}》，"
+                "请先取消后再改选"
+            )
+        elif default_state == CLAIMABLE_STATE:
+            default_tip = "按默认领取周期直接领取该任务"
+        else:
+            default_tip = f"当前不满足任务条件：{default_reason}"
         action = [{
             "component": "VBtn",
-            "props": action_props,
-            "text": "去领取" if state == "去领取" else state,
+            "props": default_props,
+            "text": default_text,
+            "events": {
+                "click": {
+                    "api": "plugin/TaskHelper/default_task",
+                    "method": "POST",
+                    "params": {
+                        "action": "set_default",
+                        "site_id": site_id,
+                        "task_id": exam_id,
+                    },
+                }
+            },
             "content": [{
                 "component": "VTooltip",
                 "props": {"activator": "parent", "location": "top"},
-                "text": task.get("reason") or state,
+                "text": default_tip,
+            }],
+        }, {
+            "component": "VBtn",
+            "props": claim_props,
+            "text": claim_text,
+            "events": {
+                "click": {
+                    "api": "plugin/TaskHelper/claim_task",
+                    "method": "POST",
+                    "params": {
+                        "action": "claim",
+                        "site_id": site_id,
+                        "task_id": exam_id,
+                    },
+                }
+            },
+            "content": [{
+                "component": "VTooltip",
+                "props": {"activator": "parent", "location": "top"},
+                "text": claim_tip,
             }],
         }]
         metrics = [
@@ -541,6 +1011,8 @@ class TaskHelper(_PluginBase):
                                 },
                                 *[self._chip(category, "#0ea5e9")
                                   for category in task.get("categories") or []],
+                                *([self._chip("默认领取", "#7c3aed")]
+                                  if is_default else []),
                             ],
                         },
                         {
@@ -581,8 +1053,7 @@ class TaskHelper(_PluginBase):
             }],
         }
 
-    @staticmethod
-    def _stats(totals: Dict, last_run: Dict) -> dict:
+    def _stats(self, totals: Dict, last_run: Dict) -> dict:
         return {
             "component": "VRow",
             "props": {"class": "mb-4"},
@@ -600,7 +1071,7 @@ class TaskHelper(_PluginBase):
                         {"component": "VChip", "props": {"variant": "flat", "color": "green-lighten-4"},
                          "text": f"已领取 {totals['claimed']}"},
                         {"component": "VChip", "props": {"variant": "flat", "color": "green-lighten-4"},
-                         "text": f"可去领取 {totals['actionable']}"},
+                         "text": f"可直接领取 {totals['actionable']}"},
                         {"component": "VChip", "props": {"variant": "flat", "color": "grey-lighten-4"},
                          "text": f"上次错误 {last_run.get('errors', 0)}"},
                     ],
