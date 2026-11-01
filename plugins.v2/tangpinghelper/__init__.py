@@ -21,9 +21,9 @@ from app.utils.http import RequestUtils
 class TangPingHelper(_PluginBase):
     # ==================== 插件元数据 ====================
     plugin_name = "躺平PT助手"
-    plugin_desc = "躺平PT自动领红包、抽奖累加器、任务与勋章领取。\n支持自动领取红包、循环抽奖、智能任务领取、自动领取魔力加成≥0的可领取勋章，各功能独立开关与定时，每日统计数据按天清除。"
+    plugin_desc = "躺平PT自动领红包、抽奖累加器与勋章领取。\n支持自动领取红包、循环抽奖、自动领取魔力加成≥0的可领取勋章，各功能独立开关与定时，每日统计数据按天清除。"
     plugin_icon = "tangping.png"
-    plugin_version = "1.1.4"
+    plugin_version = "1.2.0"
     plugin_author = "liheji"
     author_url = "https://github.com/liheji"
     plugin_config_prefix = "tangpinghelper_"
@@ -60,28 +60,17 @@ class TangPingHelper(_PluginBase):
     # 各功能独立开关
     _enabled_lottery: bool = False
     _enabled_redpacket: bool = False
-    _enabled_task: bool = False
     _enabled_medal: bool = False
 
     # 各功能独立 cron
     _cron_lottery: str = ""
     _cron_redpacket: str = ""
-    _cron_task: str = ""
     _cron_medal: str = ""
 
     # 各功能独立「立即」按钮
     _onlyonce_lottery: bool = False
     _onlyonce_redpacket: bool = False
-    _onlyonce_task: bool = False
     _onlyonce_medal: bool = False
-
-    # 任务相关常量
-    TASK_PAGE_PATH = "/task.php"
-    TASK_AJAX_PATH = "/ajax.php"
-    # 任务优先级：月底最后一天（距下月>2h）→ BUG > VIP > 苍蝇腿
-    TASK_PRIORITY_EOM = ["BUG", "VIP", "苍蝇腿"]
-    # 普通时间 → 只领苍蝇腿（VIP/BUG 仅限月末）
-    TASK_PRIORITY_NORMAL = ["苍蝇腿"]
 
     # ==================== 生命周期 ====================
 
@@ -95,24 +84,21 @@ class TangPingHelper(_PluginBase):
 
             self._enabled_lottery = config.get("enabled_lottery", False)
             self._enabled_redpacket = config.get("enabled_redpacket", False)
-            self._enabled_task = config.get("enabled_task", False)
             self._enabled_medal = config.get("enabled_medal", False)
 
             self._cron_lottery = config.get("cron_lottery") or "0 */6 * * *"
             self._cron_redpacket = config.get("cron_redpacket") or "*/10 * * * *"
-            self._cron_task = config.get("cron_task") or "0 */6 * * *"
             self._cron_medal = config.get("cron_medal") or "0 9 * * *"
 
             self._onlyonce_lottery = config.get("onlyonce_lottery", False)
             self._onlyonce_redpacket = config.get("onlyonce_redpacket", False)
-            self._onlyonce_task = config.get("onlyonce_task", False)
             self._onlyonce_medal = config.get("onlyonce_medal", False)
 
             self.__update_config()
 
         # 站点自检：启用/立即运行前必须存在躺平PT站点，否则自动关闭并告警
         any_onlyonce = (self._onlyonce_lottery or self._onlyonce_redpacket
-                        or self._onlyonce_task or self._onlyonce_medal)
+                        or self._onlyonce_medal)
         if self._enabled or any_onlyonce:
             if self._get_site_info(quiet=True) is None:
                 logger.warning(
@@ -122,25 +108,22 @@ class TangPingHelper(_PluginBase):
                 self._enabled = False
                 self._onlyonce_lottery = False
                 self._onlyonce_redpacket = False
-                self._onlyonce_task = False
                 self._onlyonce_medal = False
                 self.__update_config()
 
         # 检查是否需要立即运行
         any_onlyonce = (self._onlyonce_lottery or self._onlyonce_redpacket
-                        or self._onlyonce_task or self._onlyonce_medal)
+                        or self._onlyonce_medal)
         if self._enabled or any_onlyonce:
             if any_onlyonce:
                 # 在重置前捕获需要执行的模块
                 do_lottery = self._onlyonce_lottery
                 do_redpacket = self._onlyonce_redpacket
-                do_task = self._onlyonce_task
                 do_medal = self._onlyonce_medal
 
                 # 立即重置开关
                 self._onlyonce_lottery = False
                 self._onlyonce_redpacket = False
-                self._onlyonce_task = False
                 self._onlyonce_medal = False
                 self.__update_config()
 
@@ -152,7 +135,6 @@ class TangPingHelper(_PluginBase):
                     kwargs={
                         "do_lottery": do_lottery,
                         "do_redpacket": do_redpacket,
-                        "do_task": do_task,
                         "do_medal": do_medal,
                     },
                     trigger='date',
@@ -186,15 +168,12 @@ class TangPingHelper(_PluginBase):
             "notify": self._notify,
             "enabled_lottery": self._enabled_lottery,
             "enabled_redpacket": self._enabled_redpacket,
-            "enabled_task": self._enabled_task,
             "enabled_medal": self._enabled_medal,
             "cron_lottery": self._cron_lottery,
             "cron_redpacket": self._cron_redpacket,
-            "cron_task": self._cron_task,
             "cron_medal": self._cron_medal,
             "onlyonce_lottery": self._onlyonce_lottery,
             "onlyonce_redpacket": self._onlyonce_redpacket,
-            "onlyonce_task": self._onlyonce_task,
             "onlyonce_medal": self._onlyonce_medal,
         })
 
@@ -307,7 +286,7 @@ class TangPingHelper(_PluginBase):
 
     def _clear_old_data(self):
         """清除非今日的统计数据"""
-        prefixes = ["redpacket_stats", "lottery_stats", "task_stats", "medal_stats"]
+        prefixes = ["redpacket_stats", "lottery_stats", "medal_stats"]
         for prefix in prefixes:
             # 获取所有相关键（通过尝试昨天及以前的模式）
             for days_ago in range(1, 32):
@@ -318,7 +297,7 @@ class TangPingHelper(_PluginBase):
                     self.del_data(old_key)
                     logger.debug(f"已清除旧数据: {old_key}")
 
-    # ==================== 任务模块 ====================
+    # ==================== 通用页面解析 ====================
 
     @staticmethod
     def _node_text(node) -> str:
@@ -342,232 +321,6 @@ class TangPingHelper(_PluginBase):
             return float(text)
         except ValueError:
             return None
-
-    def _fetch_task_page(self, site_info: Dict) -> Optional[str]:
-        """获取任务页面 HTML"""
-        res = self._make_get_request(site_info, self.TASK_PAGE_PATH)
-        if res is None or res.status_code != 200:
-            logger.error(f"[任务] 获取任务页面失败: HTTP {res.status_code if res else '无响应'}")
-            return None
-        return res.text
-
-    def _parse_tasks(self, html: str) -> List[Dict]:
-        """
-        解析任务页面 HTML，提取任务列表。
-        返回: [{"name": str, "exam_id": int, "claimable": bool, "claimed": bool}, ...]
-        """
-        if not html:
-            return []
-
-        root = etree.HTML(html)
-        if root is None:
-            return []
-
-        tasks = []
-        name_tags = root.xpath('//td[@class="nowrap"]/strong')
-        for name_tag in name_tags:
-            rows = name_tag.xpath("ancestor::tr[1]")
-            if not rows:
-                continue
-            row = rows[0]
-            button = next(
-                (
-                    b for b in row.xpath('.//input[@type="button"]')
-                    if (b.get("data-id") or "").isdigit()
-                ),
-                None,
-            )
-            if button is None:
-                continue
-
-            exam_id_text = button.get("data-id", "")
-            name = self._node_text(name_tag)
-            exam_id = int(exam_id_text)
-            btn_class = (button.get("class") or "").strip()
-            btn_value = (button.get("value") or "").strip()
-
-            claimed = "已经认领" in btn_value
-            claimable = btn_class == "claim" and not claimed and button.get("disabled") is None
-
-            tasks.append({
-                "name": name,
-                "exam_id": exam_id,
-                "claimable": claimable,
-                "claimed": claimed,
-            })
-            logger.info(
-                f"[任务] 发现任务: {name} (ID={exam_id}) "
-                f"状态={'可领取' if claimable else '已认领' if claimed else '不可领取'}"
-            )
-
-        logger.info(f"[任务] 共解析到 {len(tasks)} 个任务，可领取 {sum(1 for t in tasks if t['claimable'])} 个")
-        return tasks
-
-    def _claim_task(self, site_info: Dict, exam_id: int) -> Tuple[bool, str]:
-        """
-        领取指定任务。
-        返回: (成功与否, 消息)
-        """
-        data = {
-            "action": "claimTask",
-            "params[exam_id]": exam_id,
-        }
-        res = self._make_post_request(site_info, self.TASK_AJAX_PATH, data=data)
-
-        if res is None:
-            return False, "领取请求无响应"
-
-        try:
-            result = res.json()
-        except Exception as e:
-            return False, f"解析领取响应失败: {str(e)}"
-
-        ret = result.get("ret")
-        msg = result.get("msg", "")
-
-        if ret == 0:
-            logger.info(f"[任务] ✅ 任务 ID={exam_id} 领取成功: {msg}")
-            return True, msg
-        else:
-            logger.warning(f"[任务] ❌ 任务 ID={exam_id} 领取失败: ret={ret} msg={msg}")
-            return False, msg
-
-    def _determine_task_priority(self) -> List[str]:
-        """
-        根据当前时间判断任务优先级列表。
-        月末最后一天 → BUG > VIP > 苍蝇腿（距今日结束≥2h已在入口处检查）
-        其他时间 → 只领苍蝇腿
-        """
-        now = datetime.now()
-        tomorrow = now + timedelta(days=1)
-        is_last_day_of_month = tomorrow.month != now.month
-
-        if is_last_day_of_month:
-            logger.info("[任务] 月底最后一天，优先级: BUG > VIP > 苍蝇腿")
-            return self.TASK_PRIORITY_EOM
-        else:
-            logger.info("[任务] 非月底最后一天，优先级: 只领苍蝇腿")
-            return self.TASK_PRIORITY_NORMAL
-
-    def _run_task_claim(self, site_info: Dict) -> Dict:
-        """
-        自动领取任务核心逻辑。
-        返回统计信息字典。
-        """
-        stats = {
-            "claimed": False,
-            "claimed_task": "",
-            "claimed_id": None,
-            "message": "",
-            "already_claimed_today": False,
-            "available_tasks": [],
-            "errors": [],
-        }
-
-        # 检查今日是否已执行过（一天只能领取一个任务，无论成败）
-        today_key = self._today_key("task_stats")
-        today_task_data = self.get_data(today_key) or {}
-        if today_task_data:
-            logger.info(f"[任务] 今日已执行过「{today_task_data.get('claimed_task')}」，跳过")
-            stats["already_claimed_today"] = True
-            stats["claimed_task"] = today_task_data.get("claimed_task", "")
-            stats["message"] = today_task_data.get("message", "")
-            stats["claimed"] = today_task_data.get("claimed", False)
-            return stats
-
-        # 检查距今日结束是否 >= 2 小时（所有任务都要求此条件）
-        now = datetime.now()
-        end_of_today = datetime(now.year, now.month, now.day, 23, 59, 59)
-        hours_until_eod = (end_of_today - now).total_seconds() / 3600
-        if hours_until_eod < 2:
-            logger.info(
-                f"[任务] 距今日结束仅 {hours_until_eod:.1f}h < 2h，"
-                f"不满足领取条件，跳过"
-            )
-            stats["message"] = f"距今日结束仅{hours_until_eod:.1f}h，不足2小时，跳过"
-            return stats
-
-        # 1. 获取任务页面
-        logger.info("[任务] 获取任务列表...")
-        html = self._fetch_task_page(site_info)
-        if html is None:
-            stats["errors"].append("获取任务页面失败")
-            return stats
-
-        # 2. 解析任务列表
-        tasks = self._parse_tasks(html)
-        if not tasks:
-            stats["errors"].append("未解析到任何任务")
-            return stats
-
-        # 2a. 优先检查页面中是否已有已认领的任务（一天只能领取一个）
-        already_claimed = [t for t in tasks if t["claimed"]]
-        if already_claimed:
-            selected = already_claimed[0]
-            logger.info(f"[任务] 页面检测到已认领任务「{selected['name']}」，无需再次领取")
-            self.save_data(today_key, {
-                "claimed": True,
-                "claimed_task": selected["name"],
-                "claimed_id": selected["exam_id"],
-                "message": "已认领（页面检测）",
-                "errors": [],
-                "claim_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            })
-            stats["claimed"] = True
-            stats["claimed_task"] = selected["name"]
-            stats["claimed_id"] = selected["exam_id"]
-            stats["message"] = "已认领（页面检测）"
-            return stats
-
-        stats["available_tasks"] = [t["name"] for t in tasks if t["claimable"]]
-
-        # 过滤可领取的任务
-        claimable_map = {t["name"]: t for t in tasks if t["claimable"]}
-        if not claimable_map:
-            claimed_names = [t["name"] for t in tasks if t["claimed"]]
-            logger.info(f"[任务] 没有可领取的任务，已认领: {claimed_names}")
-            stats["message"] = "所有任务已认领"
-            return stats
-
-        # 3. 按优先级选择任务
-        priorities = self._determine_task_priority()
-        selected = None
-        for target_name in priorities:
-            if target_name in claimable_map:
-                selected = claimable_map[target_name]
-                logger.info(f"[任务] 按优先级选择: {target_name} (ID={selected['exam_id']})")
-                break
-
-        if selected is None:
-            # 优先级中的任务都不可领取
-            claimed_names = [t["name"] for t in tasks if t["claimed"]]
-            logger.info(f"[任务] 优先级任务均不可领取（已认领: {claimed_names}），跳过")
-            stats["message"] = f"优先级任务均不可领取"
-            return stats
-
-        # 4. 执行领取
-        success, msg = self._claim_task(site_info, selected["exam_id"])
-
-        stats["claimed"] = success
-        stats["claimed_task"] = selected["name"]
-        stats["claimed_id"] = selected["exam_id"]
-        stats["message"] = msg
-
-        if not success:
-            stats["errors"].append(f"领取「{selected['name']}」失败: {msg}")
-
-        # 5. 保存今日结果
-        self.save_data(today_key, {
-            "claimed": success,
-            "claimed_task": selected["name"],
-            "claimed_id": selected["exam_id"],
-            "message": msg,
-            "errors": stats["errors"],
-            "claim_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
-
-        logger.info(f"[任务] 本次完成: {'✅' if success else '❌'} {selected['name']} - {msg}")
-        return stats
 
     def _run_redpacket(self, site_info: Dict) -> Dict:
         """
@@ -1304,22 +1057,21 @@ class TangPingHelper(_PluginBase):
     # ==================== 统一调度 ====================
 
     def _run_immediate(self, do_lottery: bool = False, do_redpacket: bool = False,
-                       do_task: bool = False, do_medal: bool = False):
+                       do_medal: bool = False):
         """「立即」按钮调度入口，只执行被点击的模块"""
         try:
-            self.__run_immediate_inner(do_lottery, do_redpacket, do_task, do_medal)
+            self.__run_immediate_inner(do_lottery, do_redpacket, do_medal)
         except Exception as e:
             logger.error(f"躺平PT助手执行异常: {str(e)}")
             traceback.print_exc()
 
     def __run_immediate_inner(self, do_lottery: bool, do_redpacket: bool,
-                              do_task: bool, do_medal: bool = False):
+                              do_medal: bool = False):
         logger.info("=" * 50)
         logger.info(
             f"躺平PT助手 立即执行: "
             f"抽奖={'✅' if do_lottery else '❌'} "
             f"红包={'✅' if do_redpacket else '❌'} "
-            f"任务={'✅' if do_task else '❌'} "
             f"勋章={'✅' if do_medal else '❌'}"
         )
 
@@ -1338,7 +1090,6 @@ class TangPingHelper(_PluginBase):
 
         redpacket_stats = None
         lottery_stats = None
-        task_stats = None
         medal_stats = None
 
         if do_redpacket:
@@ -1357,14 +1108,6 @@ class TangPingHelper(_PluginBase):
                 logger.error(f"[抽奖] 异常: {str(e)}")
                 traceback.print_exc()
 
-        if do_task:
-            logger.info("[任务] 立即领取...")
-            try:
-                task_stats = self._run_task_claim(site_info)
-            except Exception as e:
-                logger.error(f"[任务] 异常: {str(e)}")
-                traceback.print_exc()
-
         if do_medal:
             logger.info("[勋章] 立即领取...")
             try:
@@ -1373,16 +1116,16 @@ class TangPingHelper(_PluginBase):
                 logger.error(f"[勋章] 异常: {str(e)}")
                 traceback.print_exc()
 
-        if self._notify and (redpacket_stats or lottery_stats or task_stats or medal_stats):
+        if self._notify and (redpacket_stats or lottery_stats or medal_stats):
             self._send_notification(
-                site_name, redpacket_stats, lottery_stats, task_stats, medal_stats
+                site_name, redpacket_stats, lottery_stats, medal_stats
             )
 
         logger.info("躺平PT助手 立即执行完成")
         logger.info("=" * 50)
 
     def _send_notification(self, site_name: str, redpacket_stats: Dict = None,
-                           lottery_stats: Dict = None, task_stats: Dict = None,
+                           lottery_stats: Dict = None,
                            medal_stats: Dict = None):
         """组装并发送通知消息"""
         parts = [f"【躺平PT助手】{site_name}\n"]
@@ -1412,19 +1155,6 @@ class TangPingHelper(_PluginBase):
             if ls.get("errors"):
                 unique_errors = list(set(ls["errors"]))[:3]
                 parts.append(f"  · 提示: {'; '.join(unique_errors)}")
-
-        if task_stats:
-            ts = task_stats
-            parts.append("📋 任务领取:")
-            if ts.get("already_claimed_today"):
-                parts.append(f"  · 今日已领取: {ts.get('claimed_task', '-')}")
-            elif ts.get("claimed"):
-                parts.append(f"  · 领取任务: {ts.get('claimed_task', '-')} ✅")
-                parts.append(f"  · 结果: {ts.get('message', '-')}")
-            elif ts.get("errors"):
-                parts.append(f"  · 错误: {'; '.join(ts['errors'][:3])}")
-            else:
-                parts.append(f"  · 状态: {ts.get('message', '无可领取任务')}")
 
         if medal_stats:
             ms = medal_stats
@@ -1493,17 +1223,6 @@ class TangPingHelper(_PluginBase):
                     "func": self.run_redpacket_service,
                     "kwargs": {}
                 })
-        # 任务
-        if self._enabled_task:
-            trigger = self._parse_cron(self._cron_task)
-            if trigger:
-                services.append({
-                    "id": "TangPingHelper.Task",
-                    "name": "躺平PT-自动领任务",
-                    "trigger": trigger,
-                    "func": self.run_task_service,
-                    "kwargs": {}
-                })
         # 勋章
         if self._enabled_medal:
             trigger = self._parse_cron(self._cron_medal)
@@ -1524,10 +1243,6 @@ class TangPingHelper(_PluginBase):
     def run_redpacket_service(self):
         """定时服务：红包"""
         self._run_single("红包", self._run_redpacket)
-
-    def run_task_service(self):
-        """定时服务：任务"""
-        self._run_single("任务", self._run_task_claim)
 
     def run_medal_service(self):
         """定时服务：勋章"""
@@ -1552,7 +1267,7 @@ class TangPingHelper(_PluginBase):
             traceback.print_exc()
             stats = {"errors": [str(e)]}
         if self._notify and stats:
-            _key_map = {"抽奖": "lottery", "红包": "redpacket", "任务": "task", "勋章": "medal"}
+            _key_map = {"抽奖": "lottery", "红包": "redpacket", "勋章": "medal"}
             kwargs = {f"{_key_map.get(name, name)}_stats": stats}
             self._send_notification(site_info.get("name", "躺平PT"), **kwargs)
         logger.info(f"[{name}] 定时任务完成")
@@ -1561,43 +1276,7 @@ class TangPingHelper(_PluginBase):
 
     def get_api(self) -> List[Dict[str, Any]]:
         """注册插件 API"""
-        return [{
-            "path": "/claim_task",
-            "endpoint": self.claim_task_api,
-            "methods": ["POST"],
-            "auth": "bear",
-            "summary": "自动领取躺平PT任务",
-            "description": "获取任务列表并按照优先级规则自动领取当日任务",
-        }]
-
-    def claim_task_api(self) -> dict:
-        """API: 手动触发任务领取"""
-        site_info = self._get_site_info()
-        if not site_info:
-            return {"success": False, "message": "未找到躺平PT站点"}
-
-        try:
-            task_stats = self._run_task_claim(site_info)
-            if task_stats.get("already_claimed_today"):
-                return {
-                    "success": True,
-                    "message": f"今日已领取过任务「{task_stats.get('claimed_task')}」",
-                    "data": task_stats,
-                }
-            if task_stats.get("claimed"):
-                return {
-                    "success": True,
-                    "message": f"成功领取任务「{task_stats.get('claimed_task')}」",
-                    "data": task_stats,
-                }
-            return {
-                "success": False,
-                "message": task_stats.get("message") or "无可领取的任务",
-                "data": task_stats,
-            }
-        except Exception as e:
-            logger.error(f"[任务] API调用异常: {str(e)}")
-            return {"success": False, "message": f"执行异常: {str(e)}"}
+        return []
 
     # ==================== 配置表单 ====================
 
@@ -1679,52 +1358,6 @@ class TangPingHelper(_PluginBase):
                                         'props': {
                                             'model': 'onlyonce_lottery',
                                             'label': '立即抽奖',
-                                        }
-                                    }
-                                ]
-                            },
-                        ]
-                    },
-                    # 第三排：自动领任务 | 任务周期 | 立即领任务
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'enabled_task',
-                                            'label': '自动领任务',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
-                                'content': [
-                                    {
-                                        'component': 'VCronField',
-                                        'props': {
-                                            'model': 'cron_task',
-                                            'label': '领任务周期',
-                                            'placeholder': '留空则不定时执行',
-                                        }
-                                    }
-                                ]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
-                                'content': [
-                                    {
-                                        'component': 'VSwitch',
-                                        'props': {
-                                            'model': 'onlyonce_task',
-                                            'label': '立即领任务',
                                         }
                                     }
                                 ]
@@ -1840,10 +1473,9 @@ class TangPingHelper(_PluginBase):
                                             'density': 'compact',
                                             'text': '自动匹配 tangpt.top 站点（需先在站点管理中配置）。'
                                                     '抽奖默认每6h执行一次（0 */6 * * *），红包默认每10min执行一次（*/10 * * * *），'
-                                                    '任务默认每6h执行一次（0 */6 * * *），勋章默认每天9点执行一次（0 9 * * *），'
+                                                    '勋章默认每天9点执行一次（0 9 * * *），'
                                                     '留空则不定时执行。'
                                                     '抽奖固定循环至次数用完（间隔5s）；红包循环领取至无红包；'
-                                                    '任务距今日结束≥2h可领，月末 BUG>VIP>苍蝇腿，平时只领苍蝇腿；'
                                                     '勋章会遍历全部分页，领取所有魔力加成≥0且可领取（含购买）的勋章；'
                                                     '加成为负或无法解析的勋章禁止领取。'
                                         }
@@ -1859,15 +1491,12 @@ class TangPingHelper(_PluginBase):
             "notify": True,
             "enabled_lottery": False,
             "enabled_redpacket": False,
-            "enabled_task": False,
             "enabled_medal": False,
             "cron_lottery": "0 */6 * * *",
-            "cron_task": "0 */6 * * *",
             "cron_redpacket": "*/10 * * * *",
             "cron_medal": "0 9 * * *",
             "onlyonce_lottery": False,
             "onlyonce_redpacket": False,
-            "onlyonce_task": False,
             "onlyonce_medal": False,
         }
 
@@ -1878,10 +1507,9 @@ class TangPingHelper(_PluginBase):
         date_str = datetime.now().strftime("%Y-%m-%d")
         redpacket_data = self.get_data(f"redpacket_stats_{date_str}") or {}
         lottery_data = self.get_data(f"lottery_stats_{date_str}") or {}
-        task_data = self.get_data(f"task_stats_{date_str}") or {}
         medal_data = self.get_data(f"medal_stats_{date_str}") or {}
 
-        if not any([redpacket_data, lottery_data, task_data, medal_data]):
+        if not any([redpacket_data, lottery_data, medal_data]):
             return [{
                 'component': 'VAlert',
                 'props': {
@@ -1919,24 +1547,6 @@ class TangPingHelper(_PluginBase):
                 {'label': '获得魔力', 'value': self._fmt_num(rp.get('total_magic', 0)), 'color': '#22c55e'},
                 {'label': '上限状态', 'value': limit_text, 'color': limit_color},
                 {'label': '最后执行', 'value': rp.get('last_run', '-'), 'color': '#94a3b8'},
-            ]))
-
-        # ── 任务模块 ──
-        if task_data:
-            ts = task_data
-            if ts.get('claimed'):
-                status_text = '✅ 已领取'
-                status_color = '#22c55e'
-            else:
-                status_text = '⚠️ 未成功'
-                status_color = '#f59e0b'
-
-            page.append(self._section_header('📋', '任务领取', '#06b6d4'))
-            page.append(self._metric_grid([
-                {'label': '任务名称', 'value': ts.get('claimed_task', '-'), 'color': '#06b6d4'},
-                {'label': '领取状态', 'value': status_text, 'color': status_color},
-                {'label': '返回消息', 'value': ts.get('message', '-'), 'color': '#94a3b8'},
-                {'label': '领取时间', 'value': ts.get('claim_time', '-'), 'color': '#94a3b8'},
             ]))
 
         # ── 勋章模块 ──
