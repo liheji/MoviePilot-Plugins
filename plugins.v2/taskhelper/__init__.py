@@ -793,7 +793,7 @@ class TaskHelper(_PluginBase):
                 ),
                 *([
                     self._chip(
-                        f"默认领取 {default.get('task_name') or default.get('task_id')}",
+                        f"默认领取：{default.get('task_name') or default.get('task_id')}",
                         "green",
                     )
                 ] if default else []),
