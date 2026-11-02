@@ -36,7 +36,7 @@ class TaskHelper(_PluginBase):
         "支持直接领取和每站唯一默认任务定时领取。"
     )
     plugin_icon = "PTHelper_A.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "liheji"
     author_url = "https://github.com/liheji"
     plugin_config_prefix = "taskhelper_"
@@ -47,8 +47,7 @@ class TaskHelper(_PluginBase):
     _site_schema: List[type] = list(TASK_SITE_HANDLERS)
     _enabled: bool = False
     _onlyonce: bool = False
-    _cron: str = "0 */6 * * *"
-    _default_claim_cron: str = "*/30 * * * *"
+    _cron: str = "3 * * * *"
     _default_claims: Dict[str, Dict[str, Any]] = {}
     _site_ids: List[Any] = []
     _timeout: int = 20
@@ -59,8 +58,7 @@ class TaskHelper(_PluginBase):
         config = config or {}
         self._enabled = bool(config.get("enabled"))
         self._onlyonce = bool(config.get("onlyonce"))
-        self._cron = config.get("cron") or "0 */6 * * *"
-        self._default_claim_cron = config.get("default_claim_cron") or ""
+        self._cron = config.get("cron") or "*/30 * * * *"
         self._default_claims = config.get("default_claims") or {}
         self._site_ids = config.get("site_ids") or []
         self._timeout = int(config.get("timeout") or 20)
@@ -74,7 +72,7 @@ class TaskHelper(_PluginBase):
         if self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             self._scheduler.add_job(
-                func=self.refresh,
+                func=self.check_and_claim,
                 trigger="date",
                 run_date=self._now() + timedelta(seconds=3),
                 name="PT任务助手",
@@ -117,37 +115,24 @@ class TaskHelper(_PluginBase):
             logger.error(f"[任务助手] 停止服务失败：{err}")
 
     def get_service(self) -> List[Dict[str, Any]]:
-        jobs = []
         if self._enabled and self._cron:
             try:
-                jobs.append({
+                return [{
                     "id": "TaskHelper",
-                    "name": "PT任务助手-定时抓取",
+                    "name": "PT任务助手-检查并领取默认任务",
                     "trigger": CronTrigger.from_crontab(self._cron),
-                    "func": self.refresh,
+                    "func": self.check_and_claim,
                     "kwargs": {},
-                })
+                }]
             except ValueError as err:
                 logger.error(f"[任务助手] Cron 配置无效：{err}")
-        if self._enabled and self._default_claim_cron:
-            try:
-                jobs.append({
-                    "id": "TaskHelperDefaultClaim",
-                    "name": "PT任务助手-默认任务领取",
-                    "trigger": CronTrigger.from_crontab(self._default_claim_cron),
-                    "func": self.run_default_claims,
-                    "kwargs": {},
-                })
-            except ValueError as err:
-                logger.error(f"[任务助手] 默认领取 Cron 配置无效：{err}")
-        return jobs
+        return []
 
     def __update_config(self):
         self.update_config({
             "enabled": self._enabled,
             "onlyonce": self._onlyonce,
             "cron": self._cron,
-            "default_claim_cron": self._default_claim_cron,
             "default_claims": self._default_claims,
             "site_ids": self._site_ids,
             "timeout": self._timeout,
@@ -462,28 +447,36 @@ class TaskHelper(_PluginBase):
             "task_id": target["exam_id"],
         }
 
-    def run_default_claims(self) -> Dict[str, int]:
-        """Run once per cron trigger; failures are intentionally not retried."""
+    def check_and_claim(self) -> Dict[str, int]:
+        """Refresh all sites, then claim defaults from the same snapshots."""
+        snapshots = self.refresh()
+        return self._claim_defaults(snapshots, self._sites_by_id())
+
+    def _claim_defaults(self, snapshots: Dict[str, Dict],
+                        sites: Dict[str, Dict]) -> Dict[str, int]:
         summary = {"sites": 0, "attempted": 0, "claimed": 0, "failed": 0, "skipped": 0}
-        sites = self._sites_by_id()
         selected = {str(site_id) for site_id in self._site_ids}
         for site_id, default in self._default_claims.items():
             site_id = str(site_id)
             if site_id not in selected:
                 continue
-            site = sites.get(site_id)
-            if not site:
+            snapshot = snapshots.get(site_id)
+            if not snapshot:
                 summary["skipped"] += 1
                 continue
             summary["sites"] += 1
             try:
                 task_id = default.get("task_id")
-                tasks = self._fetch_site_tasks(site)
+                tasks = snapshot.get("tasks") or []
                 target = self._task_by_id(tasks, task_id)
                 if not target or target.get("state") != CLAIMABLE_STATE:
                     summary["skipped"] += 1
                     continue
                 summary["attempted"] += 1
+                site = sites.get(site_id)
+                if not site:
+                    summary["skipped"] += 1
+                    continue
                 success, message = self._request_claim(site, target["exam_id"])
                 if success:
                     summary["claimed"] += 1
@@ -541,6 +534,7 @@ class TaskHelper(_PluginBase):
         return None
 
     def refresh(self):
+        snapshots = {}
         sites = {str(site.get("id")): site for site in SitesHelper().get_indexers()}
         users = self._user_metadata()
         now = self._now().replace(tzinfo=None)
@@ -622,6 +616,7 @@ class TaskHelper(_PluginBase):
                 "updated": now.strftime("%Y-%m-%d %H:%M:%S"),
             }
             self.save_data(key, data)
+            snapshots[str(site_id)] = data
             summary["sites"] += 1
             summary["tasks"] += len(tasks)
             summary["actionable"] += sum(
@@ -635,6 +630,7 @@ class TaskHelper(_PluginBase):
 
         self.save_data("last_run", summary)
         logger.info(f"[任务助手] 抓取完成：{summary}")
+        return snapshots
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         version = getattr(settings, "VERSION_FLAG", "v1")
@@ -666,10 +662,9 @@ class TaskHelper(_PluginBase):
                         self._field(12, "VSelect", "site_ids", "选择站点",
                                     items=sites, multiple=True, chips=True,
                                     variant="outlined"),
-                        self._field(6, cron_component, "cron", "任务抓取周期",
-                                    placeholder="0 */6 * * *"),
-                        self._field(6, cron_component, "default_claim_cron",
-                                    "默认领取周期", placeholder="*/30 * * * *"),
+                        self._field(12, cron_component, "cron",
+                                    "任务检查与默认领取周期",
+                                    placeholder="*/30 * * * *"),
                     ],
                 },
                 {
@@ -678,18 +673,16 @@ class TaskHelper(_PluginBase):
                         "type": "info",
                         "variant": "tonal",
                         "density": "compact",
-                        "text": "抓取 task.php 与 mybonus.php；条件满足时可直接领取。"
-                                "每个站点最多设置一个默认领取任务，按默认领取周期执行。"
-                                "领取失败不重试，等待下一次周期；每月、每日或每小时任务"
-                                "按站点当前任务状态领取。",
+                        "text": "每个周期先刷新全部站点任务，再使用同一份最新结果"
+                                "处理各站默认领取。每个站点最多设置一个默认任务；"
+                                "领取失败不重试，等待下一次周期。",
                     },
                 },
             ],
         }], {
             "enabled": False,
             "onlyonce": False,
-            "cron": "0 */6 * * *",
-            "default_claim_cron": "*/30 * * * *",
+            "cron": "*/30 * * * *",
             "default_claims": {},
             "site_ids": [],
             "timeout": 20,
