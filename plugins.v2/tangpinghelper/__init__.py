@@ -23,7 +23,7 @@ class TangPingHelper(_PluginBase):
     plugin_name = "躺平PT助手"
     plugin_desc = "躺平PT自动领红包、抽奖累加器与勋章领取。\n支持自动领取红包、循环抽奖、自动领取魔力加成≥0的可领取勋章，各功能独立开关与定时，每日统计数据按天清除。"
     plugin_icon = "tangping.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "liheji"
     author_url = "https://github.com/liheji"
     plugin_config_prefix = "tangpinghelper_"
@@ -45,6 +45,7 @@ class TangPingHelper(_PluginBase):
     LOTTERY_PAGE_PATH = "/omnibot_lottery.php"
     LOTTERY_DRAW_PATH = "/web/omnibot/lottery/draw"
     LOTTERY_DELAY = 5  # 固定每轮间隔（秒）
+    LOTTERY_REQUEST_TIMEOUT = 120  # 批量抽奖耗时较长，避免服务端已执行但客户端提前断开
     MEDAL_PAGE_PATH = "/medal.php"
     MEDAL_AJAX_PATH = "/ajax.php"
     MEDAL_DELAY = 1.2  # 每次领取间隔（秒）
@@ -224,10 +225,11 @@ class TangPingHelper(_PluginBase):
             cookies=cookies,
             ua=ua,
             proxies=proxies,
-            timeout=30
+            timeout=60
         ).get_res(url=full_url)
 
-    def _make_post_request(self, site_info: Dict, path: str, data: dict = None):
+    def _make_post_request(self, site_info: Dict, path: str, data: dict = None,
+                           timeout: int = 60):
         """使用站点 Cookie 发起 POST 请求"""
         base_url = self._get_base_url(site_info)
         full_url = f"{base_url}{path}"
@@ -246,7 +248,7 @@ class TangPingHelper(_PluginBase):
             ua=ua,
             proxies=proxies,
             headers=headers,
-            timeout=30
+            timeout=timeout
         ).post_res(url=full_url, data=data)
 
     # ==================== 数据键（按天） ====================
@@ -564,12 +566,20 @@ class TangPingHelper(_PluginBase):
             if not line:
                 continue
 
-            # 匹配 "key：数值 单位（可选注释）"
-            m = re.match(r'^(.+?)[：:]\s*([\d.]+)\s*(\S+?)(?:\s*[（(]([^)]*)[)）])?\s*$', line)
+            # 匹配 "key：数值[单位][说明]"，例如 "魔力值: 16.11M 点"
+            m = re.match(
+                r'^(.+?)[：:]\s*([+-]?\d[\d,]*(?:\.\d+)?)\s*([^\s（(]*).*$',
+                line,
+            )
             if m:
                 label = m.group(1).strip()
-                val = float(m.group(2))
+                val = float(m.group(2).replace(",", ""))
                 unit = m.group(3)
+                compact_units = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+                compact_match = re.match(r'^([KMBkmb])(.*)$', unit)
+                if compact_match:
+                    val *= compact_units[compact_match.group(1).upper()]
+                    unit = compact_match.group(2)
                 if not parsed.get(label):
                     parsed[label] = {"value": 0, "unit": unit}
                 parsed[label]["value"] += val
@@ -625,11 +635,24 @@ class TangPingHelper(_PluginBase):
         # 加载今日已有累计（固定键，避免跨午夜不一致）
         date_key = self._today_key("lottery_stats")
         today_stats = self.get_data(date_key) or {}
+        # 1.x 的抽奖统计会漏记无回执请求，不能继续累加；升级后重建当日数据。
+        if today_stats and today_stats.get("data_version", 1) < 2:
+            logger.warning("[抽奖] 检测到旧版统计口径，重建今日抽奖数据")
+            today_stats = {}
         total_draws = today_stats.get("total_draws", 0)
         total_cost = today_stats.get("total_cost", 0)
         total_compensated = today_stats.get("total_compensated", 0)
         total_awarded = today_stats.get("total_awarded", 0)
         summary_acc = today_stats.get("summary", {})
+        balance_before = today_stats.get("balance_before")
+        balance_before_estimated = today_stats.get("balance_before_estimated", False)
+        cost_per_draw = today_stats.get("cost_per_draw", 0)
+        unconfirmed_count = today_stats.get("unconfirmed_count", 0)
+        unconfirmed_draws = today_stats.get("unconfirmed_draws", 0)
+        unconfirmed_draws_without_cost = today_stats.get(
+            "unconfirmed_draws_without_cost", 0
+        )
+        incomplete = today_stats.get("incomplete", False)
 
         stats = {
             "request_count": today_stats.get("request_count", 0),
@@ -637,10 +660,17 @@ class TangPingHelper(_PluginBase):
             "total_cost": total_cost,
             "total_compensated": total_compensated,
             "total_awarded": total_awarded,
+            "balance_before": balance_before,
+            "balance_before_estimated": balance_before_estimated,
             "first_bonus_after": today_stats.get("first_bonus_after"),
             "last_bonus_after": today_stats.get("last_bonus_after"),
             "summary": summary_acc,
-            "net_change": total_awarded - total_cost,
+            "net_change": None,
+            "net_change_estimated": True,
+            "unconfirmed_count": unconfirmed_count,
+            "unconfirmed_draws": unconfirmed_draws,
+            "unconfirmed_draws_without_cost": unconfirmed_draws_without_cost,
+            "incomplete": incomplete,
             "errors": [],
             "stopped_early": False,
             "stop_reason": "",
@@ -676,27 +706,64 @@ class TangPingHelper(_PluginBase):
                 batch = next((c for c in VALID_DRAW_COUNTS if c <= remaining), 1)
             else:
                 batch = 100
+            remaining_before = remaining
             logger.info(f"[抽奖] 第 {i} 次请求（count={batch}）...")
 
+            stats["request_count"] += 1
             res = self._make_post_request(
                 site_info,
                 self.LOTTERY_DRAW_PATH,
-                data={"count": batch}
+                data={"count": batch},
+                timeout=self.LOTTERY_REQUEST_TIMEOUT,
             )
-            remaining = -1  # 仅首轮使用解析值
 
             if res is None:
                 msg = f"第 {i} 次请求失败：无响应"
                 logger.warning(f"[抽奖] {msg}")
                 stats["errors"].append(msg)
-                if len(stats["errors"]) >= 5:
-                    stats["stopped_early"] = True
-                    stats["stop_reason"] = "连续错误过多，停止抽奖"
-                    break
+                stats["incomplete"] = True
                 time.sleep(3)
-                continue
 
-            stats["request_count"] += 1
+                # 请求可能已在服务端执行。通过抽奖页剩余次数核对，
+                # 确认已执行后再继续，避免盲目重试导致重复扣费。
+                reconciled_remaining = -1
+                try:
+                    check_res = self._make_get_request(site_info, self.LOTTERY_PAGE_PATH)
+                    if check_res and check_res.status_code == 200:
+                        reconciled_remaining = self._parse_lottery_remaining(check_res.text or "")
+                except Exception as e:
+                    logger.warning(f"[抽奖] 无响应请求核对失败: {str(e)}")
+
+                if 0 <= reconciled_remaining < remaining_before:
+                    consumed = min(batch, remaining_before - reconciled_remaining)
+                    unconfirmed_draws += consumed
+                    unconfirmed_count += 1
+                    total_draws += consumed
+                    if cost_per_draw > 0:
+                        total_cost += consumed * cost_per_draw
+                    else:
+                        unconfirmed_draws_without_cost += consumed
+                    stats["unconfirmed_draws"] = unconfirmed_draws
+                    stats["unconfirmed_draws_without_cost"] = (
+                        unconfirmed_draws_without_cost
+                    )
+                    stats["unconfirmed_count"] = unconfirmed_count
+                    stats["total_draws"] = total_draws
+                    stats["total_cost"] = total_cost
+                    remaining = reconciled_remaining
+                    logger.warning(
+                        f"[抽奖] 无响应请求已由服务端执行 {consumed} 次，"
+                        "已按已知单价补记消耗；奖励明细不完整"
+                    )
+                    if remaining <= 0:
+                        stats["stopped_early"] = True
+                        stats["stop_reason"] = "服务端已无可抽次数，且存在无回执批次"
+                        break
+                    continue
+
+                stats["stopped_early"] = True
+                stats["stop_reason"] = "抽奖请求无响应，已停止以避免重复抽奖"
+                break
 
             try:
                 data = res.json()
@@ -720,7 +787,6 @@ class TangPingHelper(_PluginBase):
                 total_draws += draw_count
                 total_cost += cost
                 total_compensated += compensated
-                total_awarded += awarded
 
                 if stats["first_bonus_after"] is None and bonus_after is not None:
                     stats["first_bonus_after"] = bonus_after
@@ -729,12 +795,77 @@ class TangPingHelper(_PluginBase):
 
                 # 解析权益汇总
                 summary_src = data.get("summary_lines") or data.get("summary_text")
-                if summary_src:
+                response_magic = None
+                results = data.get("results")
+                has_structured_results = isinstance(results, list) and bool(results)
+                if summary_src and not has_structured_results:
                     parsed = self._parse_summary_lines(summary_src)
                     for key, item in parsed.items():
                         if key not in summary_acc:
                             summary_acc[key] = {"value": 0, "unit": item.get("unit", "")}
                         summary_acc[key]["value"] += item["value"]
+                    response_magic = parsed.get("魔力值", {}).get("value")
+
+                # 结构化结果最可靠：bonus_delta 含补偿，扣除 comp_bonus 后才是实际奖励。
+                if has_structured_results:
+                    awarded = 0
+                    for item in results:
+                        if not isinstance(item, dict):
+                            continue
+                        try:
+                            bonus_delta = float(item.get("bonus_delta") or 0)
+                            comp_bonus = float(item.get("comp_bonus") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        awarded += max(0, bonus_delta - comp_bonus)
+                        for entry in item.get("summary_entries") or []:
+                            if not isinstance(entry, dict):
+                                continue
+                            label = str(entry.get("label") or "").strip()
+                            if not label:
+                                continue
+                            raw_value = (
+                                entry.get("granted_amount")
+                                if "granted_amount" in entry
+                                else entry.get("amount", 0)
+                            )
+                            try:
+                                value = float(raw_value or 0)
+                            except (TypeError, ValueError):
+                                continue
+                            unit = str(entry.get("unit") or "")
+                            if label not in summary_acc:
+                                summary_acc[label] = {"value": 0, "unit": unit}
+                            summary_acc[label]["value"] += value
+                elif response_magic not in (None, 0):
+                    awarded = response_magic
+                total_awarded += awarded
+
+                reported_cost_per_draw = data.get("cost_per_draw")
+                if reported_cost_per_draw is not None:
+                    cost_per_draw = reported_cost_per_draw
+                elif draw_count:
+                    cost_per_draw = cost / draw_count
+                    if unconfirmed_draws_without_cost > 0:
+                        total_cost += unconfirmed_draws_without_cost * cost_per_draw
+                        unconfirmed_draws_without_cost = 0
+                        stats["unconfirmed_draws_without_cost"] = 0
+
+                # 首轮没有服务端 before 余额时，用本轮实际收支反推供展示；
+                # 净变化仍独立按抽奖自身的奖励、补偿和消耗计算。
+                if balance_before is None and bonus_after is not None:
+                    explicit_before = data.get("user_bonus_before")
+                    if explicit_before is not None:
+                        balance_before = explicit_before
+                        balance_before_estimated = False
+                    else:
+                        balance_before = (
+                            bonus_after - awarded - compensated + cost
+                        )
+                        balance_before_estimated = True
+
+                if remaining > 0:
+                    remaining = max(0, remaining - draw_count)
 
                 logger.info(
                     f"[抽奖] ✅ 第{i}次 抽奖{draw_count}次 "
@@ -774,20 +905,33 @@ class TangPingHelper(_PluginBase):
         stats["total_compensated"] = total_compensated
         stats["total_awarded"] = total_awarded
         stats["summary"] = summary_acc
+        stats["balance_before"] = balance_before
+        stats["balance_before_estimated"] = balance_before_estimated
         stats["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        stats["net_change"] = total_awarded - total_cost
+        # 净变化只统计抽奖自身收支，不能混入同时运行的红包等其他余额变化。
+        stats["net_change"] = total_awarded + total_compensated - total_cost
+        stats["net_change_estimated"] = bool(stats["incomplete"])
 
         # 保存今日累计数据（复用入口处固定的键）
         self.save_data(date_key, {
+            "data_version": 2,
             "request_count": stats["request_count"],
             "total_draws": total_draws,
             "total_cost": total_cost,
             "total_compensated": total_compensated,
             "total_awarded": total_awarded,
+            "balance_before": stats["balance_before"],
+            "balance_before_estimated": stats["balance_before_estimated"],
             "first_bonus_after": stats["first_bonus_after"],
             "last_bonus_after": stats["last_bonus_after"],
             "summary": summary_acc,
             "net_change": stats["net_change"],
+            "net_change_estimated": stats["net_change_estimated"],
+            "cost_per_draw": cost_per_draw,
+            "unconfirmed_count": stats["unconfirmed_count"],
+            "unconfirmed_draws": stats["unconfirmed_draws"],
+            "unconfirmed_draws_without_cost": stats["unconfirmed_draws_without_cost"],
+            "incomplete": stats["incomplete"],
             "start_time": stats["start_time"],
             "end_time": stats["end_time"],
             "stop_reason": stats["stop_reason"],
@@ -1142,14 +1286,32 @@ class TangPingHelper(_PluginBase):
 
         if lottery_stats:
             ls = lottery_stats
+            summary = ls.get("summary", {})
+            summary_magic = summary.get("魔力值", {})
+            awarded = (
+                summary_magic.get("value", 0)
+                if isinstance(summary_magic, dict)
+                else summary_magic
+            )
+            if not awarded:
+                awarded = ls.get("total_awarded", 0)
+            nc = awarded + ls.get("total_compensated", 0) - ls.get("total_cost", 0)
+            net_estimated = bool(
+                ls.get("incomplete") or ls.get("unconfirmed_count", 0)
+            )
             parts.append("🎰 抽奖累加:")
             parts.append(f"  · 请求次数: {ls.get('request_count', 0)}")
             parts.append(f"  · 累计抽奖: {ls.get('total_draws', 0)} 次")
             parts.append(f"  · 消耗魔力: {ls.get('total_cost', 0):,}")
-            parts.append(f"  · 获得魔力: {ls.get('total_awarded', 0):,}")
-            nc = ls.get('net_change', 0)
+            parts.append(f"  · 获得魔力: {awarded:,}")
             sign = "+" if nc >= 0 else ""
-            parts.append(f"  · 净变化: {sign}{nc:,}")
+            net_label = "净变化(不完整)" if net_estimated else "净变化"
+            parts.append(f"  · {net_label}: {sign}{nc:,}")
+            if ls.get("incomplete") or ls.get("unconfirmed_count", 0):
+                parts.append(
+                    f"  · 统计提示: {ls.get('unconfirmed_count', 0)} 批无回执，"
+                    "抽奖次数和消耗已核对，奖励明细不完整"
+                )
             if ls.get("stop_reason"):
                 parts.append(f"  · 停止原因: {ls['stop_reason']}")
             if ls.get("errors"):
@@ -1581,8 +1743,37 @@ class TangPingHelper(_PluginBase):
         # ── 抽奖模块 ──
         if lottery_data:
             ls = lottery_data
-            nc = ls.get('net_change', 0)
+            legacy_stats = ls.get('data_version', 1) < 2
+            summary = ls.get('summary', {})
+            summary_magic = summary.get('魔力值', {})
+            awarded = (
+                summary_magic.get('value', 0)
+                if isinstance(summary_magic, dict)
+                else summary_magic
+            )
+            if not awarded:
+                awarded = ls.get('total_awarded', 0)
+            balance_before = ls.get('balance_before')
+            nc = awarded + ls.get('total_compensated', 0) - ls.get('total_cost', 0)
+            net_estimated = bool(
+                legacy_stats
+                or ls.get('incomplete')
+                or ls.get('unconfirmed_count', 0)
+            )
             nc_color = '#22c55e' if nc >= 0 else '#ef4444'
+            if balance_before is not None:
+                balance_label = (
+                    '抽奖前余额(估)'
+                    if ls.get('balance_before_estimated')
+                    else '抽奖前余额'
+                )
+                balance_value = balance_before
+            elif ls.get('first_bonus_after') is not None:
+                balance_label = '首抽后余额'
+                balance_value = ls.get('first_bonus_after')
+            else:
+                balance_label = '开始余额'
+                balance_value = None
 
             page.append(self._section_header('🎰', '抽奖统计', '#8b5cf6'))
             page.append(self._metric_grid([
@@ -1590,12 +1781,32 @@ class TangPingHelper(_PluginBase):
                 {'label': '累计抽奖', 'value': self._fmt_num(ls.get('total_draws', 0)), 'unit': '次',
                  'color': '#f59e0b'},
                 {'label': '消耗魔力', 'value': self._fmt_num(ls.get('total_cost', 0)), 'color': '#ef4444'},
-                {'label': '获得魔力', 'value': self._fmt_num(ls.get('total_awarded', 0)), 'color': '#22c55e'},
+                {'label': '获得魔力', 'value': self._fmt_num(awarded), 'color': '#22c55e'},
                 {'label': '补偿魔力', 'value': self._fmt_num(ls.get('total_compensated', 0)), 'color': '#a78bfa'},
-                {'label': '净变化', 'value': f"{'+' if nc > 0 else ''}{self._fmt_num(nc)}", 'color': nc_color},
-                {'label': '开始余额', 'value': self._fmt_num(ls.get('first_bonus_after')), 'color': '#94a3b8'},
+                {'label': '净变化(不完整)' if net_estimated else '净变化',
+                 'value': f"{'+' if nc > 0 else ''}{self._fmt_num(nc)}", 'color': nc_color},
+                {'label': balance_label, 'value': self._fmt_num(balance_value), 'color': '#94a3b8'},
                 {'label': '最终余额', 'value': self._fmt_num(ls.get('last_bonus_after')), 'color': '#f59e0b'},
             ]))
+
+            if legacy_stats or ls.get('incomplete') or ls.get('unconfirmed_count', 0):
+                if legacy_stats:
+                    alert_text = "旧版抽奖统计存在漏记；下一次抽奖运行会自动重建今日数据。"
+                else:
+                    alert_text = (
+                        f"{ls.get('unconfirmed_count', 0)} 批抽奖请求无回执；"
+                        f"已按服务端剩余次数补记 {ls.get('unconfirmed_draws', 0)} 次，"
+                        "消耗按已知单价估算，奖励明细不完整。"
+                    )
+                page.append({
+                    'component': 'VAlert',
+                    'props': {
+                        'type': 'warning',
+                        'variant': 'tonal',
+                        'text': alert_text,
+                        'class': 'mb-2',
+                    }
+                })
 
             # 执行时间
             start = ls.get('start_time', '-')
