@@ -1,6 +1,8 @@
+import hashlib
 import re
 import time
 import traceback
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, List, Dict, Tuple, Optional
 from urllib.parse import parse_qs, urlparse
@@ -23,7 +25,7 @@ class TangPingHelper(_PluginBase):
     plugin_name = "躺平PT助手"
     plugin_desc = "躺平PT自动领红包、抽奖累加器与勋章领取。\n支持自动领取红包、循环抽奖、自动领取魔力加成≥0的可领取勋章，各功能独立开关与定时，每日统计数据按天清除。"
     plugin_icon = "tangping.png"
-    plugin_version = "1.2.1"
+    plugin_version = "1.2.2"
     plugin_author = "liheji"
     author_url = "https://github.com/liheji"
     plugin_config_prefix = "tangpinghelper_"
@@ -33,6 +35,10 @@ class TangPingHelper(_PluginBase):
     # ==================== 常量 ====================
     REDPACKET_LATEST_PATH = "/api/redpacket/latest"
     REDPACKET_CLAIM_PATH = "/api/redpacket/claim"
+    REDPACKET_ANTIBOT_CHALLENGE_PATH = "/api/redpacket/antibot/challenge"
+    REDPACKET_ANTIBOT_VERIFY_PATH = "/api/redpacket/antibot/verify"
+    REDPACKET_ANTIBOT_DEVICE_KEY = "redpacket_antibot_device"
+    REDPACKET_ANTIBOT_TOKEN_KEY = "redpacket_antibot_token"
     REDPACKET_DAILY_LIMIT_KEYWORDS = (
         "每天最多领", "每日领取上限", "今日领取上限", "今日上限",
         "每日上限", "超过领取上限", "今天最多领",
@@ -229,7 +235,7 @@ class TangPingHelper(_PluginBase):
         ).get_res(url=full_url)
 
     def _make_post_request(self, site_info: Dict, path: str, data: dict = None,
-                           timeout: int = 60):
+                           timeout: int = 60, extra_headers: dict = None):
         """使用站点 Cookie 发起 POST 请求"""
         base_url = self._get_base_url(site_info)
         full_url = f"{base_url}{path}"
@@ -242,6 +248,8 @@ class TangPingHelper(_PluginBase):
             'X-Requested-With': 'XMLHttpRequest',
             'Accept': 'application/json, text/javascript, */*; q=0.01',
         }
+        if extra_headers:
+            headers.update(extra_headers)
 
         return RequestUtils(
             cookies=cookies,
@@ -299,6 +307,201 @@ class TangPingHelper(_PluginBase):
                     self.del_data(old_key)
                     logger.debug(f"已清除旧数据: {old_key}")
 
+    def _get_redpacket_device(self) -> str:
+        """获取持久化的红包设备标识。"""
+        device = self.get_data(self.REDPACKET_ANTIBOT_DEVICE_KEY)
+        if isinstance(device, str) and device:
+            return device
+        device = str(uuid.uuid4())
+        self.save_data(self.REDPACKET_ANTIBOT_DEVICE_KEY, device)
+        return device
+
+    def _get_redpacket_token(self) -> Optional[Dict]:
+        """读取仍在有效期和可用次数内的红包安全令牌。"""
+        state = self.get_data(self.REDPACKET_ANTIBOT_TOKEN_KEY)
+        if not isinstance(state, dict) or not state.get("token"):
+            return None
+        try:
+            expires_at = float(state.get("expires_at") or 0)
+            max_uses = int(state.get("max_uses") or 0)
+            used = int(state.get("used") or 0)
+        except (TypeError, ValueError):
+            self.del_data(self.REDPACKET_ANTIBOT_TOKEN_KEY)
+            return None
+        if expires_at <= time.time() + 5 or max_uses <= 0 or used >= max_uses:
+            self.del_data(self.REDPACKET_ANTIBOT_TOKEN_KEY)
+            return None
+        return state
+
+    def _save_redpacket_token(self, data: Dict):
+        self.save_data(self.REDPACKET_ANTIBOT_TOKEN_KEY, {
+            "token": data.get("token"),
+            "expires_at": data.get("expires_at"),
+            "max_uses": data.get("max_uses"),
+            "used": 0,
+            "method": data.get("method", ""),
+            "token_id": data.get("token_id", ""),
+        })
+
+    def _mark_redpacket_token_used(self):
+        state = self.get_data(self.REDPACKET_ANTIBOT_TOKEN_KEY)
+        if not isinstance(state, dict):
+            return
+        state["used"] = int(state.get("used", 0)) + 1
+        if state["used"] >= int(state.get("max_uses", 0)):
+            self.del_data(self.REDPACKET_ANTIBOT_TOKEN_KEY)
+        else:
+            self.save_data(self.REDPACKET_ANTIBOT_TOKEN_KEY, state)
+
+    def _redpacket_request_headers(self, site_info: Dict,
+                                   include_device: bool = False) -> Dict:
+        base_url = self._get_base_url(site_info)
+        parsed = urlparse(base_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme else base_url
+        headers = {
+            "Origin": origin,
+            "Referer": f"{base_url}/index.php",
+        }
+        state = self._get_redpacket_token()
+        if state:
+            headers["X-RedPacket-Device"] = self._get_redpacket_device()
+            headers["X-RedPacket-Token"] = state["token"]
+        elif include_device:
+            headers["X-RedPacket-Device"] = self._get_redpacket_device()
+        return headers
+
+    @staticmethod
+    def _redpacket_response_message(res, limit: int = 500) -> str:
+        if res is None:
+            return "无响应"
+        text = getattr(res, "text", "") or ""
+        if len(text) > limit:
+            text = text[:limit] + "..."
+        return f"HTTP {res.status_code}: {text}"
+
+    @staticmethod
+    def _solve_redpacket_pow(challenge_id: str, salt: str,
+                             difficulty_bits: int) -> Optional[int]:
+        if not challenge_id or not salt:
+            return None
+        bits = max(int(difficulty_bits or 0), 1)
+        prefix = f"{salt}:{challenge_id}:"
+        nonce = int(time.time() * 1000) % 1_000_000_000
+        limit = min(nonce + 5_000_000, 2_147_483_647)
+        while nonce < limit:
+            digest = hashlib.sha256(f"{prefix}{nonce}".encode()).hexdigest()
+            if int(digest, 16) >> (256 - bits) == 0:
+                return nonce
+            nonce += 1
+        return None
+
+    def _ensure_redpacket_antibot_token(
+        self, site_info: Dict
+    ) -> Tuple[bool, str]:
+        """处理 RedPacket 428 安全验证并获取可复用令牌。"""
+        headers = self._redpacket_request_headers(site_info, include_device=True)
+        challenge_res = self._make_post_request(
+            site_info,
+            self.REDPACKET_ANTIBOT_CHALLENGE_PATH,
+            data={"fallback": 1},
+            extra_headers=headers,
+        )
+        if challenge_res is None or challenge_res.status_code != 200:
+            return False, (
+                "获取红包安全验证失败："
+                + self._redpacket_response_message(challenge_res)
+            )
+        try:
+            challenge = challenge_res.json() or {}
+        except Exception:
+            return False, "红包安全验证响应解析失败"
+
+        mode = challenge.get("mode")
+        logger.info(f"[红包] 安全验证模式: {mode or '未知'}")
+        if mode == "disabled":
+            return True, ""
+        if mode != "pow":
+            if mode == "turnstile":
+                return False, "红包需要 Turnstile 人机验证，MoviePilot 无法自动完成"
+            return False, f"不支持的红包安全验证模式: {mode or '未知'}"
+        if challenge.get("require_confirm"):
+            return False, "红包安全验证要求人工确认，已跳过自动领取"
+
+        challenge_id = str(challenge.get("challenge_id") or "")
+        salt = str(challenge.get("salt") or "")
+        nonce = self._solve_redpacket_pow(
+            challenge_id,
+            salt,
+            int(challenge.get("difficulty_bits") or 0),
+        )
+        if nonce is None:
+            return False, "红包 PoW 安全验证求解失败"
+        logger.info(
+            f"[红包] PoW 安全验证已求解，难度 {challenge.get('difficulty_bits')} bits"
+        )
+
+        verify_res = self._make_post_request(
+            site_info,
+            self.REDPACKET_ANTIBOT_VERIFY_PATH,
+            data={
+                "challenge_id": challenge_id,
+                "mode": "pow",
+                "nonce": nonce,
+                "confirm": 0,
+            },
+            extra_headers=headers,
+        )
+        if verify_res is None or verify_res.status_code != 200:
+            return False, (
+                "红包安全验证失败："
+                + self._redpacket_response_message(verify_res)
+            )
+        try:
+            verified = verify_res.json() or {}
+        except Exception:
+            return False, "红包安全验证结果解析失败"
+        if not verified.get("ok") or not verified.get("token"):
+            return False, verified.get("message") or "红包安全验证未通过"
+        self._save_redpacket_token(verified)
+        logger.info("[红包] 安全验证通过，已保存临时领取令牌")
+        return True, ""
+
+    def _claim_redpacket(
+        self, site_info: Dict, packet_id: int
+    ) -> Tuple[Optional[Any], str]:
+        """领取红包；遇到 428 时完成安全验证并重试一次。"""
+        headers = self._redpacket_request_headers(site_info)
+        claim_res = self._make_post_request(
+            site_info,
+            self.REDPACKET_CLAIM_PATH,
+            data={"packet_id": packet_id},
+            extra_headers=headers,
+        )
+        if claim_res is not None and claim_res.status_code == 428:
+            logger.warning(
+                f"[红包] {packet_id} 需要安全验证，响应: "
+                f"{self._redpacket_response_message(claim_res)}"
+            )
+            self.del_data(self.REDPACKET_ANTIBOT_TOKEN_KEY)
+            verified, reason = self._ensure_redpacket_antibot_token(site_info)
+            if not verified:
+                return None, reason
+            headers = self._redpacket_request_headers(site_info)
+            claim_res = self._make_post_request(
+                site_info,
+                self.REDPACKET_CLAIM_PATH,
+                data={"packet_id": packet_id},
+                extra_headers=headers,
+            )
+            if claim_res is not None and claim_res.status_code == 428:
+                return None, (
+                    "红包安全验证后仍返回 428："
+                    + self._redpacket_response_message(claim_res)
+                )
+        if claim_res is not None and claim_res.status_code == 200:
+            self._mark_redpacket_token_used()
+        return claim_res, ""
+
     # ==================== 通用页面解析 ====================
 
     @staticmethod
@@ -342,6 +545,8 @@ class TangPingHelper(_PluginBase):
         today_stats = self.get_data(date_key) or {}
         claimed_count = today_stats.get("claimed_count", 0)
         total_magic = today_stats.get("total_magic", 0)
+        initial_claimed_count = claimed_count
+        initial_total_magic = total_magic
         daily_limit = today_stats.get("daily_limit_reached", False)
         daily_max = today_stats.get("daily_max", 0)
         limit_reason = today_stats.get("limit_reason", "")
@@ -363,8 +568,8 @@ class TangPingHelper(_PluginBase):
                 "last_run": today_stats.get("last_run", ""),
             })
 
-        # 今日已达上限（标记 / 累计达服务端上限 / 累计达100——脏数据恢复兜底）
-        limit_reached = daily_limit or (daily_max > 0 and claimed_count >= daily_max) or claimed_count >= 100
+        # 只信任服务端明确返回的每日上限，不自行假设固定数量。
+        limit_reached = daily_limit or (daily_max > 0 and claimed_count >= daily_max)
         if limit_reached:
             logger.info("[红包] 今日已达领取上限，跳过")
             # 脏数据恢复：标记为 False 时，强制修复持久化
@@ -384,9 +589,11 @@ class TangPingHelper(_PluginBase):
                 "limit_reason": limit_reason,
                 "last_run": today_stats.get("last_run", ""),
                 "errors": [],
+                "run_claimed_count": 0,
+                "run_magic": 0,
             }
 
-        max_rounds = 50  # 安全上限，避免无限循环
+        max_rounds = 200  # 安全上限，允许跨过多个已领完红包
         round_num = 0
         skipped_packet_ids = set()
 
@@ -426,7 +633,13 @@ class TangPingHelper(_PluginBase):
                 break
             items = [
                 item for item in items
-                if item.get("id") not in skipped_packet_ids
+                if (
+                    item.get("id") not in skipped_packet_ids
+                    and (
+                        item.get("remain_count") is None
+                        or int(item.get("remain_count") or 0) > 0
+                    )
+                )
             ]
             if not items:
                 logger.info("[红包] 当前无可用红包，结束查询")
@@ -438,11 +651,12 @@ class TangPingHelper(_PluginBase):
             sender = packet.get("sender", "未知")
             logger.info(f"[红包] 发现红包 ID={packet_id} 发送者={sender}")
 
-            claim_res = self._make_post_request(
-                site_info,
-                self.REDPACKET_CLAIM_PATH,
-                data={"packet_id": packet_id}
-            )
+            claim_res, antibot_error = self._claim_redpacket(site_info, packet_id)
+
+            if antibot_error:
+                logger.warning(f"[红包] {antibot_error}")
+                stats["errors"].append(antibot_error)
+                break
 
             if claim_res is None:
                 msg = f"领取红包 {packet_id} 失败：无响应"
@@ -462,7 +676,9 @@ class TangPingHelper(_PluginBase):
                     logger.warning(f"[红包] 每日上限已达到: {resp_msg}")
                     stats["daily_limit_reached"] = True
                     stats["limit_reason"] = resp_msg
-                    stats["daily_max"] = self._parse_daily_max(resp_msg) or 100
+                    stats["daily_max"] = (
+                        self._parse_daily_max(resp_msg) or claimed_count
+                    )
                     daily_limit = True
                     break
 
@@ -479,12 +695,13 @@ class TangPingHelper(_PluginBase):
                 continue
 
             if claim_res.status_code != 200:
-                msg = f"领取红包 {packet_id} 失败：HTTP {claim_res.status_code}"
+                msg = (
+                    f"领取红包 {packet_id} 失败："
+                    f"{self._redpacket_response_message(claim_res)}"
+                )
                 logger.warning(f"[红包] {msg}")
                 stats["errors"].append(msg)
-                # 短暂等待后继续
-                time.sleep(1)
-                continue
+                break
 
             try:
                 claim_data = claim_res.json()
@@ -504,8 +721,11 @@ class TangPingHelper(_PluginBase):
                     f"[红包] ✅ 领取成功，获得魔力:{magic}，剩余次数:{remain}，累计:{claimed_count}个/{total_magic}魔力")
 
                 if remain == 0:
-                    logger.info("[红包] 剩余次数为0，结束本轮领取")
-                    break
+                    logger.info(
+                        f"[红包] 红包 {packet_id} 已领完，继续查询下一个红包"
+                    )
+                    skipped_packet_ids.add(packet_id)
+                    continue
             else:
                 msg = claim_data.get("message", "")
                 logger.info(f"[红包] ⚠️ 领取返回异常: {msg}")
@@ -513,7 +733,7 @@ class TangPingHelper(_PluginBase):
                 if self._is_redpacket_daily_limit(msg):
                     stats["daily_limit_reached"] = True
                     stats["limit_reason"] = msg
-                    stats["daily_max"] = self._parse_daily_max(msg) or 100
+                    stats["daily_max"] = self._parse_daily_max(msg) or claimed_count
                     daily_limit = True
                     break
 
@@ -532,6 +752,8 @@ class TangPingHelper(_PluginBase):
 
         stats["claimed_count"] = claimed_count
         stats["total_magic"] = total_magic
+        stats["run_claimed_count"] = claimed_count - initial_claimed_count
+        stats["run_magic"] = total_magic - initial_total_magic
         stats["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # 保存今日累计数据（复用入口处固定的键）
@@ -544,7 +766,11 @@ class TangPingHelper(_PluginBase):
             "last_run": stats["last_run"],
         })
 
-        logger.info(f"[红包] 本次完成：领取 {stats['claimed_count']} 个，魔力 +{stats['total_magic']}")
+        logger.info(
+            f"[红包] 本次完成：本次领取 {stats['run_claimed_count']} 个，"
+            f"魔力 +{stats['run_magic']}；今日累计 {claimed_count} 个，"
+            f"{total_magic} 魔力"
+        )
         return stats
 
     # ==================== 抽奖模块 ====================
@@ -641,7 +867,8 @@ class TangPingHelper(_PluginBase):
             "or contains(concat(' ', normalize-space(@class), ' '), ' user-info ')]"
         ):
             match = re.search(
-                r'魔力值\s*[:：]?\s*([+-]?\d[\d,]*(?:\.\d+)?\s*[KMBkmb万亿]?)',
+                r'魔力值\s*(?:\[\s*使用\s*[:：]\s*)?'
+                r'([+-]?\d[\d,]*(?:\.\d+)?\s*[KMBkmb万亿]?)',
                 self._node_text(node),
             )
             if match:
@@ -661,7 +888,7 @@ class TangPingHelper(_PluginBase):
         date_key = self._today_key("lottery_stats")
         today_stats = self.get_data(date_key) or {}
         # 旧版统计缺少可信首屏余额或无回执记账，升级后重建当日数据。
-        if today_stats and today_stats.get("data_version", 1) < 7:
+        if today_stats and today_stats.get("data_version", 1) < 8:
             logger.warning("[抽奖] 检测到旧版统计口径，重建今日抽奖数据")
             today_stats = {}
         total_draws = today_stats.get("total_draws", 0)
@@ -985,7 +1212,7 @@ class TangPingHelper(_PluginBase):
 
         # 保存今日累计数据（复用入口处固定的键）
         self.save_data(date_key, {
-            "data_version": 7,
+            "data_version": 8,
             "request_count": stats["request_count"],
             "total_draws": total_draws,
             "total_cost": total_cost,
@@ -1348,8 +1575,9 @@ class TangPingHelper(_PluginBase):
         if redpacket_stats:
             rp = redpacket_stats
             parts.append("🧧 红包领取:")
-            parts.append(f"  · 本次领取: {rp.get('claimed_count', 0)} 个")
-            parts.append(f"  · 获得魔力: {rp.get('total_magic', 0)}")
+            parts.append(f"  · 本次领取: {rp.get('run_claimed_count', 0)} 个")
+            parts.append(f"  · 本次获得魔力: {rp.get('run_magic', 0)}")
+            parts.append(f"  · 今日累计: {rp.get('claimed_count', 0)} 个 / {rp.get('total_magic', 0)} 魔力")
             if rp.get("daily_limit_reached"):
                 parts.append(f"  · 状态: 已达到每日上限 ({rp.get('limit_reason', '')})")
             if rp.get("errors"):
@@ -1769,15 +1997,14 @@ class TangPingHelper(_PluginBase):
             limit_reached = (
                 limit_flag_valid
                 or (daily_max > 0 and claimed >= daily_max)
-                or claimed >= 100
             )
             limit_text = '已达上限' if limit_reached else '正常'
             limit_color = '#ef4444' if limit_reached else '#22c55e'
 
             page.append(self._section_header('🧧', '红包领取', '#f97316'))
             page.append(self._metric_grid([
-                {'label': '领取个数', 'value': str(rp.get('claimed_count', 0)), 'color': '#f97316'},
-                {'label': '获得魔力', 'value': self._fmt_num(rp.get('total_magic', 0)), 'color': '#22c55e'},
+                {'label': '今日领取', 'value': str(rp.get('claimed_count', 0)), 'color': '#f97316'},
+                {'label': '今日魔力', 'value': self._fmt_num(rp.get('total_magic', 0)), 'color': '#22c55e'},
                 {'label': '上限状态', 'value': limit_text, 'color': limit_color},
                 {'label': '最后执行', 'value': rp.get('last_run', '-'), 'color': '#94a3b8'},
             ]))
@@ -1814,7 +2041,7 @@ class TangPingHelper(_PluginBase):
         # ── 抽奖模块 ──
         if lottery_data:
             ls = lottery_data
-            legacy_stats = ls.get('data_version', 1) < 7
+            legacy_stats = ls.get('data_version', 1) < 8
             summary = ls.get('summary', {})
             summary_magic = summary.get('魔力值', {})
             awarded = (
