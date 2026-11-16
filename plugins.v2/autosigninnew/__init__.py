@@ -37,7 +37,7 @@ class AutoSignInNew(_PluginBase):
     # 插件图标
     plugin_icon = "signin.png"
     # 插件版本
-    plugin_version = "3.7.3"
+    plugin_version = "3.7.4"
     # 插件作者
     plugin_author = "liheji"
     # 作者主页
@@ -1799,9 +1799,9 @@ class AutoSignInNew(_PluginBase):
                             retry_msg.append(s)
                             continue
 
-                if not s.completed:
+                if not s.success:
                     failed_msg.append(s)
-                elif not s.success or "登录成功" in s.message:
+                elif "登录成功" in s.message:
                     login_success_msg.append(s)
                 elif "仿真签到成功" in str(s):
                     fz_sign_msg.append(s)

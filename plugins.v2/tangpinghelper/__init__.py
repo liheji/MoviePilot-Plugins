@@ -25,7 +25,7 @@ class TangPingHelper(_PluginBase):
     plugin_name = "躺平PT助手"
     plugin_desc = "躺平PT自动领红包、抽奖累加器与勋章领取。\n支持自动领取红包、循环抽奖、自动领取魔力加成≥0的可领取勋章，各功能独立开关与定时，每日统计数据按天清除。"
     plugin_icon = "tangping.png"
-    plugin_version = "1.2.2"
+    plugin_version = "1.2.3"
     plugin_author = "liheji"
     author_url = "https://github.com/liheji"
     plugin_config_prefix = "tangpinghelper_"
@@ -265,6 +265,12 @@ class TangPingHelper(_PluginBase):
     def _parse_daily_max(msg: str):
         """从服务端上限消息中提取每日最大数量，如 '每天最多领100个' → 100"""
         m = re.search(r'每天最多领\s*(\d+)\s*个', msg)
+        return int(m.group(1)) if m else None
+
+    @staticmethod
+    def _parse_server_claimed_count(msg: str):
+        """从服务端上限消息提取今天已领取数量。"""
+        m = re.search(r'今天已经领取\s*(\d+)\s*个', msg or "")
         return int(m.group(1)) if m else None
 
     @classmethod
@@ -550,6 +556,25 @@ class TangPingHelper(_PluginBase):
         daily_limit = today_stats.get("daily_limit_reached", False)
         daily_max = today_stats.get("daily_max", 0)
         limit_reason = today_stats.get("limit_reason", "")
+        server_reconciled_count = today_stats.get("server_reconciled_count", 0)
+        stats["server_reconciled_count"] = server_reconciled_count
+
+        server_claimed_count = self._parse_server_claimed_count(limit_reason)
+        if server_claimed_count is not None and server_claimed_count > claimed_count:
+            missing = server_claimed_count - claimed_count
+            logger.warning(
+                f"[红包] 服务端记录今日已领 {server_claimed_count} 个，"
+                f"本地少记 {missing} 个，已按服务端数量校正"
+            )
+            claimed_count = server_claimed_count
+            server_reconciled_count += missing
+            stats["claimed_count"] = claimed_count
+            stats["server_reconciled_count"] = server_reconciled_count
+            self.save_data(date_key, {
+                **today_stats,
+                "claimed_count": claimed_count,
+                "server_reconciled_count": server_reconciled_count,
+            })
 
         # 旧版本把“红包已经抢完”等 422 误记为每日上限，自动清理
         if daily_limit and not self._is_redpacket_daily_limit(limit_reason):
@@ -591,6 +616,7 @@ class TangPingHelper(_PluginBase):
                 "errors": [],
                 "run_claimed_count": 0,
                 "run_magic": 0,
+                "server_reconciled_count": server_reconciled_count,
             }
 
         max_rounds = 200  # 安全上限，允许跨过多个已领完红包
@@ -598,6 +624,42 @@ class TangPingHelper(_PluginBase):
         skipped_packet_ids = set()
 
         while round_num < max_rounds and not daily_limit:
+            current_date_key = self._today_key("redpacket_stats")
+            if current_date_key != date_key:
+                self.save_data(date_key, {
+                    "claimed_count": claimed_count,
+                    "total_magic": total_magic,
+                    "daily_limit_reached": (
+                        daily_limit or stats["daily_limit_reached"]
+                    ),
+                    "daily_max": stats.get("daily_max") or daily_max,
+                    "limit_reason": stats.get("limit_reason") or limit_reason,
+                    "server_reconciled_count": stats["server_reconciled_count"],
+                    "last_run": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                date_key = current_date_key
+                today_stats = self.get_data(date_key) or {}
+                claimed_count = today_stats.get("claimed_count", 0)
+                total_magic = today_stats.get("total_magic", 0)
+                daily_limit = today_stats.get("daily_limit_reached", False)
+                daily_max = today_stats.get("daily_max", 0)
+                limit_reason = today_stats.get("limit_reason", "")
+                server_reconciled_count = today_stats.get(
+                    "server_reconciled_count", 0
+                )
+                stats["claimed_count"] = claimed_count
+                stats["total_magic"] = total_magic
+                stats["daily_limit_reached"] = daily_limit
+                stats["limit_reason"] = limit_reason
+                stats["server_reconciled_count"] = server_reconciled_count
+                if today_stats.get("daily_max"):
+                    stats["daily_max"] = daily_max
+                logger.info(
+                    f"[红包] 日期已切换，开始新一天统计: {date_key}"
+                )
+                if daily_limit:
+                    break
+
             round_num += 1
             logger.info(f"[红包] 第 {round_num} 轮查询...")
 
@@ -679,6 +741,15 @@ class TangPingHelper(_PluginBase):
                     stats["daily_max"] = (
                         self._parse_daily_max(resp_msg) or claimed_count
                     )
+                    server_claimed_count = self._parse_server_claimed_count(resp_msg)
+                    if (
+                        server_claimed_count is not None
+                        and server_claimed_count > claimed_count
+                    ):
+                        stats["server_reconciled_count"] += (
+                            server_claimed_count - claimed_count
+                        )
+                        claimed_count = server_claimed_count
                     daily_limit = True
                     break
 
@@ -734,6 +805,15 @@ class TangPingHelper(_PluginBase):
                     stats["daily_limit_reached"] = True
                     stats["limit_reason"] = msg
                     stats["daily_max"] = self._parse_daily_max(msg) or claimed_count
+                    server_claimed_count = self._parse_server_claimed_count(msg)
+                    if (
+                        server_claimed_count is not None
+                        and server_claimed_count > claimed_count
+                    ):
+                        stats["server_reconciled_count"] += (
+                            server_claimed_count - claimed_count
+                        )
+                        claimed_count = server_claimed_count
                     daily_limit = True
                     break
 
@@ -763,6 +843,7 @@ class TangPingHelper(_PluginBase):
             "daily_limit_reached": daily_limit or stats["daily_limit_reached"],
             "daily_max": stats.get("daily_max") or daily_max,
             "limit_reason": stats.get("limit_reason") or limit_reason,
+            "server_reconciled_count": stats["server_reconciled_count"],
             "last_run": stats["last_run"],
         })
 
@@ -1582,6 +1663,11 @@ class TangPingHelper(_PluginBase):
                 parts.append(f"  · 状态: 已达到每日上限 ({rp.get('limit_reason', '')})")
             if rp.get("errors"):
                 parts.append(f"  · 错误: {'; '.join(rp['errors'][:3])}")
+            if rp.get("server_reconciled_count", 0):
+                parts.append(
+                    f"  · 服务端补正: 比本地回执多 "
+                    f"{rp.get('server_reconciled_count', 0)} 次，魔力明细不完整"
+                )
 
         if lottery_stats:
             ls = lottery_stats
@@ -2008,6 +2094,20 @@ class TangPingHelper(_PluginBase):
                 {'label': '上限状态', 'value': limit_text, 'color': limit_color},
                 {'label': '最后执行', 'value': rp.get('last_run', '-'), 'color': '#94a3b8'},
             ]))
+            if rp.get("server_reconciled_count", 0):
+                page.append({
+                    'component': 'VAlert',
+                    'props': {
+                        'type': 'warning',
+                        'variant': 'tonal',
+                        'text': (
+                            f"服务端记录比回执多 "
+                            f"{rp.get('server_reconciled_count', 0)} 次。"
+                            "已校正今日领取次数，但缺失回执无法恢复对应魔力明细。"
+                        ),
+                        'class': 'mb-2',
+                    }
+                })
 
         # ── 勋章模块 ──
         if medal_data:
