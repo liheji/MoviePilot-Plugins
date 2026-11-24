@@ -36,7 +36,7 @@ class TaskHelper(_PluginBase):
         "支持直接领取和每站唯一默认任务定时领取。"
     )
     plugin_icon = "PTHelper_A.png"
-    plugin_version = "1.2.2"
+    plugin_version = "1.2.4"
     plugin_author = "liheji"
     author_url = "https://github.com/liheji"
     plugin_config_prefix = "taskhelper_"
@@ -308,6 +308,13 @@ class TaskHelper(_PluginBase):
     def _persist_default_claims(self) -> None:
         self.__update_config()
 
+    def _load_default_claims(self) -> None:
+        """Use persisted config as shared state across plugin API instances."""
+        config = self.get_config()
+        if isinstance(config, dict) and "default_claims" in config:
+            claims = config.get("default_claims")
+            self._default_claims = claims if isinstance(claims, dict) else {}
+
     def _mark_claimed(self, site_id: str, exam_id: int) -> None:
         key = f"site_{site_id}"
         data = self.get_data(key)
@@ -398,6 +405,7 @@ class TaskHelper(_PluginBase):
         return {"success": False, "message": message}
 
     def set_default_api(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        self._load_default_claims()
         operation = data.get("action")
         if operation != "set_default":
             message = f"操作类型不匹配：默认任务接口收到 {operation or '空操作'}"
@@ -478,6 +486,7 @@ class TaskHelper(_PluginBase):
 
     def run_default_claims(self) -> Dict[str, int]:
         """Try cached defaults at high frequency without a task-page GET."""
+        self._load_default_claims()
         summary = {"sites": 0, "attempted": 0, "claimed": 0, "failed": 0, "skipped": 0}
         sites = self._sites_by_id()
         selected = {str(site_id) for site_id in self._site_ids}
@@ -741,6 +750,7 @@ class TaskHelper(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
+        self._load_default_claims()
         now = self._now().replace(tzinfo=None)
         cards = []
         totals = {"sites": 0, "tasks": 0, "claimed": 0, "actionable": 0}

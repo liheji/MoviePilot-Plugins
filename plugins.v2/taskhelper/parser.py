@@ -224,10 +224,12 @@ def _level_allowed(target: str, level: str) -> Optional[bool]:
         return None
     level_text = target.split("注册天数范围", 1)[0]
     allowed = set()
-    for name in LEVEL_NAMES:
+    remaining = level_text
+    for name in sorted(LEVEL_NAMES, key=len, reverse=True):
         pattern = rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])"
-        if re.search(pattern, level_text, re.IGNORECASE):
+        if re.search(pattern, remaining, re.IGNORECASE):
             allowed.add(name.casefold())
+            remaining = re.sub(pattern, " ", remaining, flags=re.IGNORECASE)
     return level.casefold() in allowed if allowed else None
 
 
